@@ -164,8 +164,29 @@ def draft_node(state: BlogState) -> BlogState:
                 "You are a professional blog writer. Write clear, engaging, "
                 "well-structured content for each section heading provided. "
                 "Combined, all sections should total roughly {word_target} words. "
-                "Write plain prose (Markdown-safe), no headings inside content "
-                "since the heading is already given separately.",
+
+                "Write plain prose that is Markdown-safe. Do not add a heading of "
+                "your own because the section heading is already provided separately. "
+
+                "Use natural formatting to improve readability. When the content "
+                "would benefit from a list of items, steps, tips, features, examples, "
+                "or key points, use Markdown bullet points or numbered lists instead "
+                "of forcing everything into a paragraph. Use bullets only when they "
+                "are genuinely appropriate, not for every section. "
+
+                "When a short quotation, expert-style statement, statistic, or "
+                "notable takeaway would strengthen the content, you may use a Markdown "
+                "block quote. Do not invent quotes or attribute statements to real "
+                "people unless the source or attribution is provided. "
+
+                "Keep paragraphs easy to read. Generally write 3-4 sentences per "
+                "paragraph and then start a new paragraph. Avoid unnecessarily long "
+                "blocks of text. Vary paragraph length naturally when the content "
+                "calls for it. "
+
+                "Use Markdown formatting such as bullet lists, numbered lists, "
+                "and block quotes only where it improves clarity. Do not add "
+                "unnecessary formatting, headings, or decorative elements."
             ),
             (
                 "human",
