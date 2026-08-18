@@ -1,0 +1,88 @@
+services:
+  chromadb:
+    image: chromadb/chroma:${CHROMA_VERSION}
+    container_name: chroma-server-blog
+    volumes:
+      # 1. Persist your data (own directory — never point this at the clinical
+      #    project's ./chroma_data, or the two Chroma servers will corrupt
+      #    each other's collections)
+      - ./chroma_data/chroma:/chroma
+      # 2. Link your separate config file into the container
+      - ./config.yaml:/config.yaml
+    ports:
+      - "8002:8000" # different host port than the clinical project's 8001
+    environment:
+      - CHROMA_CONFIG_PATH=/config.yaml
+    restart: always
+    networks:
+      - blog-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-server-blog
+    ports:
+      - "11435:11434" # different host port than the clinical project's 11434
+    volumes:
+      - ./ollama_data:/root/.ollama
+    environment:
+      # Allow up to 4 requests to process at the exact same time
+      - OLLAMA_NUM_PARALLEL=4
+      # Restrict each model instance to 2-4 threads so they don't starve each other
+      - OLLAMA_NUM_THREADS=4
+      # Prevent the model from being unloaded from memory between fast sequential calls
+      - OLLAMA_KEEP_ALIVE=60m
+    restart: unless-stopped
+    networks:
+      - blog-net
+
+  scraper:
+    build: .
+    container_name: blog-scraper
+    volumes:
+      - ./data:/app/data
+    command: ["python", "blog_scrape/blog_scraper.py", "--output", "data/blog_posts.csv"]
+    networks:
+      - blog-net
+
+  ingestor:
+    build: .
+    container_name: blog-ingestor
+    volumes:
+      - ./data:/app/data
+      - ./chroma_data:/app/chroma_data # ensure ingestor can access Chroma's data directory
+    command: ["python", "-m", "backend.ingest_csv"] # -m form so `from backend.tools import ...` resolves
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - OLLAMA_URL=http://host.docker.internal:11435
+      - PYTHONPATH=/app
+    depends_on:
+      chromadb:
+        condition: service_started # only starts after chromadb container is up
+    networks:
+      - blog-net
+
+  ui:
+    build: .
+    container_name: blog-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    command: ["streamlit", "run", "ui/app_test.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - OLLAMA_URL=http://host.docker.internal:11435
+      - PYTHONPATH=/app
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      - GEMMA_MODEL=${GEMINI_MODEL:-gemma-4-31b-it}
+    depends_on:
+      - ingestor
+    networks:
+      - blog-net
+
+networks:
+  blog-net:
+    driver: bridge

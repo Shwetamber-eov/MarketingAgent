@@ -1,0 +1,14 @@
+# Chroma v1.0.0 Configuration
+# Path where the database will be stored (matches the volume in docker-compose)
+persist_path: "/chroma"
+
+# Allow the database to be reset via the API (useful for development)
+allow_reset: true
+
+# Telemetry settings
+telemetry:
+  enabled: false
+
+# Server settings
+server:
+  http_port: 8000
