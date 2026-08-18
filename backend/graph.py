@@ -17,12 +17,13 @@ or send to an API.
 
 import os
 from typing import TypedDict, List
+from dotenv import load_dotenv
 
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
-
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Structured output schemas
@@ -41,8 +42,23 @@ class BlogPlan(BaseModel):
 class Section(BaseModel):
     heading: str = Field(description="Section heading, matches an outline item")
     content: str = Field(
-        description="Full section content in Markdown-safe plain text "
-        "(paragraphs, may include bullet points using '-')"
+        description=(
+            "Full section content in Markdown-safe plain text. Formatting rules "
+            "this field MUST follow: "
+            "(1) PARAGRAPHS: write in short paragraphs of 3-4 sentences, each "
+            "separated by a blank line ('\\n\\n'). Never write a block of text "
+            "longer than 4 sentences without breaking it into a new paragraph. "
+            "(2) LISTS: whenever the content naturally involves 3+ items, steps, "
+            "tips, features, or examples, format them as a Markdown bullet list "
+            "('- item') or numbered list ('1. item') instead of cramming them "
+            "into a sentence with commas. "
+            "(3) QUOTES: if a statistic, strong claim, or standout takeaway fits "
+            "the section, set it off as a Markdown block quote ('> text') - do "
+            "not force one into every section, and never invent a statistic or "
+            "attribute a quote to a real named person. "
+            "A well-formed section mixes these elements; it is not just a wall "
+            "of prose."
+        )
     )
 
 
@@ -57,7 +73,12 @@ class BlogPost(BaseModel):
     meta_description: str
     tags: List[str]
     sections: List[Section]
-    conclusion: str = Field(description="A short, strong closing paragraph")
+    conclusion: str = Field(
+        description=(
+            "A short, strong closing paragraph (3-4 sentences max). Plain "
+            "prose, no bullet points or block quotes here."
+        )
+    )
     estimated_read_time_minutes: int = Field(
         description="Estimated reading time in minutes, based on total word count"
     )
@@ -80,20 +101,44 @@ class BlogState(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 # LLM factory
 # ---------------------------------------------------------------------------
+# Model strings currently valid on the Gemini API (generativelanguage.googleapis.com)
+# for GOOGLE_MODEL. Gemma models are served through the same Gemini API/key, so no
+# separate credential is needed to switch between these.
+#   "gemini-3.5-flash-lite"  -> Google's hosted lite model. Best instruction-following
+#                                of the three for a nuanced formatting task like this,
+#                                and the cheapest/fastest. Recommended default.
+#   "gemma-4-31b-it"         -> Open-weight dense 31B model, native function calling.
+#                                Noticeably stronger reasoning/instruction-following
+#                                than gemma-3-12b-it, at higher latency/cost than
+#                                Flash-Lite.
+#   "gemma-3-12b-it"         -> Open-weight 12B model. Fastest/cheapest of the open
+#                                models but the weakest at following multi-part
+#                                formatting instructions (bullets/quotes/paragraph
+#                                length) under structured/function-calling output -
+#                                expect more misses on this task than the other two.
+_VALID_MODELS = {"gemini-3.5-flash-lite", "gemma-4-31b-it", "gemma-3-12b-it"}
+
+
 def get_llm(temperature: float = 0.7) -> ChatGoogleGenerativeAI:
     """
-    Builds the Gemini chat model.
+    Builds the Gemini/Gemma chat model.
 
-    Reads the model name from the GOOGLE_MODEL env var so you can point
-    this at whichever Gemini Flash-Lite model string is currently valid
-    for your API key (e.g. "gemini-2.0-flash-lite", "gemini-2.5-flash-lite",
-    etc.) without touching code.
+    Reads the model name from the GOOGLE_MODEL env var (defaults to
+    "gemini-3.5-flash-lite" if unset) so you can point this at whichever of
+    the supported model strings you want without touching code.
     """
-    model_name = os.environ.get("GOOGLE_MODEL", "gemini-3.1-flash-lite")
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    model_name = os.getenv("GOOGLE_MODEL", "gemini-3.5-flash-lite")
+    api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError(
             "GOOGLE_API_KEY is not set. Add it to your .env file or environment."
+        )
+    if model_name not in _VALID_MODELS:
+        # Not fatal - Google may add new model strings after this was written -
+        # but flag it since a typo'd model name is a common silent failure mode.
+        print(
+            f"[warning] GOOGLE_MODEL={model_name!r} is not one of the models this "
+            f"workflow was tuned against ({sorted(_VALID_MODELS)}). Proceeding anyway."
         )
     return ChatGoogleGenerativeAI(
         model=model_name,
@@ -106,7 +151,7 @@ def get_structured_llm(schema: type[BaseModel], temperature: float = 0.7):
     """Returns an LLM bound to always respond with the given Pydantic schema."""
     llm = get_llm(temperature=temperature)
     # Uses function-calling / tool-mode structured output under the hood,
-    # which Gemini models support via langchain_google_genai. The return
+    # which Gemini/Gemma models support via langchain_google_genai. The return
     # value is a validated instance of `schema`, not raw text.
     return llm.with_structured_output(schema)
 
@@ -116,9 +161,34 @@ def get_structured_llm(schema: type[BaseModel], temperature: float = 0.7):
 # ---------------------------------------------------------------------------
 LENGTH_WORDS = {
     "short": "200-250",
-    "medium": "800-1200",
-    "long": "1500-2000",
+    "medium": "300-500",
+    "long": "600-800",
 }
+
+# A concrete worked example of the expected formatting. Small/lite models follow
+# a demonstrated pattern far more reliably than an abstract list of rules, so this
+# is included directly in the draft prompt.
+FORMATTING_EXAMPLE = """\
+Example of correctly formatted section content (for a section about "choosing a \
+running shoe"):
+
+Picking the right running shoe comes down to matching the shoe to your gait and \
+mileage, not just the brand. Most runners fall into one of three categories: \
+neutral, overpronator, or supinator. Getting a gait analysis at a specialty running \
+store is the fastest way to find out which one you are.
+
+Once you know your gait type, a few features matter more than the rest:
+
+- **Cushioning**: more cushioning reduces impact on long runs but can feel less responsive
+- **Drop**: the heel-to-toe height difference, usually 0-12mm
+- **Stability**: added support for overpronators, usually a firmer foam wedge
+
+> Runners who replace shoes every 300-500 miles report noticeably fewer overuse \
+injuries than those who run shoes into the ground.
+
+Try on shoes later in the day, when your feet are slightly swollen, and always \
+walk or jog a few steps in-store before buying.
+"""
 
 
 def plan_node(state: BlogState) -> BlogState:
@@ -163,30 +233,32 @@ def draft_node(state: BlogState) -> BlogState:
                 "system",
                 "You are a professional blog writer. Write clear, engaging, "
                 "well-structured content for each section heading provided. "
-                "Combined, all sections should total roughly {word_target} words. "
+                "Combined, all sections should total roughly {word_target} words.\n\n"
 
-                "Write plain prose that is Markdown-safe. Do not add a heading of "
-                "your own because the section heading is already provided separately. "
+                "You MUST follow these three formatting rules in every section:\n\n"
 
-                "Use natural formatting to improve readability. When the content "
-                "would benefit from a list of items, steps, tips, features, examples, "
-                "or key points, use Markdown bullet points or numbered lists instead "
-                "of forcing everything into a paragraph. Use bullets only when they "
-                "are genuinely appropriate, not for every section. "
+                "1. SHORT PARAGRAPHS - Write 3-4 sentences, then insert a blank "
+                "line and start a new paragraph. Do not write a single block of "
+                "5+ sentences under any circumstances. A section is normally "
+                "2-4 short paragraphs, not one long one.\n\n"
 
-                "When a short quotation, expert-style statement, statistic, or "
-                "notable takeaway would strengthen the content, you may use a Markdown "
-                "block quote. Do not invent quotes or attribute statements to real "
-                "people unless the source or attribution is provided. "
+                "2. BULLETS WHEN LISTING - If you are describing 3 or more items, "
+                "steps, tips, features, or examples, you MUST format them as a "
+                "Markdown bullet list ('- item') or numbered list ('1. item'). "
+                "Do not describe a list of items inside a paragraph using commas. "
+                "Skip this rule for sections that genuinely have nothing to list.\n\n"
 
-                "Keep paragraphs easy to read. Generally write 3-4 sentences per "
-                "paragraph and then start a new paragraph. Avoid unnecessarily long "
-                "blocks of text. Vary paragraph length naturally when the content "
-                "calls for it. "
+                "3. ONE BLOCK QUOTE WHEN IT FITS - If a section contains a "
+                "statistic, a strong claim, or a summarizing takeaway, set it "
+                "off using a Markdown block quote ('> text'). Do not force a "
+                "quote into a section where nothing warrants it, and never "
+                "invent a statistic or attribute a statement to a real named "
+                "person.\n\n"
 
-                "Use Markdown formatting such as bullet lists, numbered lists, "
-                "and block quotes only where it improves clarity. Do not add "
-                "unnecessary formatting, headings, or decorative elements."
+                "Do not add a heading of your own - the section heading is "
+                "already provided separately.\n\n"
+                "not necessary to add bullet points in every section"
+                "{formatting_example}",
             ),
             (
                 "human",
@@ -207,6 +279,7 @@ def draft_node(state: BlogState) -> BlogState:
             "tone": state.get("tone", "professional"),
             "audience": state.get("audience", "general readers"),
             "keyword": state["keyword"],
+            "formatting_example": FORMATTING_EXAMPLE,
         }
     )
     return {"sections": [s.model_dump() for s in result.sections]}
@@ -224,10 +297,26 @@ def polish_node(state: BlogState) -> BlogState:
                 "You are a professional editor. You are given a blog plan and "
                 "drafted sections. Improve clarity, flow, grammar, and "
                 "professionalism of every section's content while preserving "
-                "meaning and structure. Write a short, strong conclusion. "
-                "Estimate reading time in minutes from total word count "
-                "(assume ~200 words/minute). Return the complete finished "
-                "blog post as structured data.",
+                "meaning and structure.\n\n"
+
+                "CRITICAL - do not flatten formatting: the drafts may already "
+                "contain short paragraphs, Markdown bullet lists ('- item'), or "
+                "block quotes ('> text'). You must PRESERVE these - never merge "
+                "a bullet list or block quote back into a plain paragraph, and "
+                "never merge separate short paragraphs into one long paragraph. "
+                "Keep the 3-4 sentence paragraph breaks intact.\n\n"
+
+                "If a section is a wall of prose with no formatting and it "
+                "contains 3+ listable items, convert that list into a Markdown "
+                "bullet list as part of your edit. If a section contains a "
+                "statistic or standout takeaway with no block quote, you may "
+                "add one - but never invent a statistic or attribute a quote "
+                "to a real named person.\n\n"
+
+                "Write a short, strong conclusion (4-5 sentences, plain prose, "
+                "no bullets or quotes). Estimate reading time in minutes from "
+                "total word count (assume ~150 words/minute). Return the "
+                "complete finished blog post as structured data.",
             ),
             (
                 "human",
@@ -271,7 +360,7 @@ def generate_blog(
     keyword: str,
     tone: str = "professional",
     audience: str = "general readers",
-    length: str = "medium",
+    length: str = "short",
 ) -> BlogState:
     """Convenience wrapper: run the full graph for a keyword and return state.
 
