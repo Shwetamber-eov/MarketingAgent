@@ -10,12 +10,16 @@ Run with:
 import os
 import json
 import datetime
-
 import streamlit as st
 from dotenv import load_dotenv
+from pathlib import Path
+import sys
 
-from MarketingAgent.backend.graph import generate_blog
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
+from backend.graph import generate_blog
+from backend.tools import isblogexist
 load_dotenv()
 
 st.set_page_config(
@@ -30,7 +34,7 @@ st.set_page_config(
 with st.sidebar:
     st.header("⚙️ Settings")
 
-    env_key_present = bool(os.environ.get("GOOGLE_API_KEY"))
+    env_key_present = bool(os.getenv("GOOGLE_API_KEY"))
     api_key_input = st.text_input(
         "Google API Key",
         value="",
@@ -47,10 +51,10 @@ with st.sidebar:
 
     model_name = st.text_input(
         "Gemini model name",
-        value=os.environ.get("GOOGLE_MODEL", "gemini-2.0-flash-lite"),
+        value=os.getenv("GEMMA_MODEL", "gemma-4-31b-it"),
         help="Must match a model string your API key can access.",
     )
-    os.environ["GOOGLE_MODEL"] = model_name
+    # os.environ["GOOGLE_MODEL"] = model_name
 
     st.divider()
     tone = st.selectbox(
@@ -66,6 +70,14 @@ with st.sidebar:
     st.divider()
     st.caption("Pipeline: Plan → Draft → Polish (LangGraph)")
     st.caption("Every step returns structured JSON, not free text.")
+
+# NOTE: the sidebar above is commented out, but `tone`, `audience`, and
+# `length` are still referenced later when calling generate_blog(). Defining
+# them here keeps the app runnable until the sidebar is switched back on —
+# swap these for the sidebar widgets whenever you re-enable that block.
+# tone = "professional"
+# audience = "general readers"
+# length = "medium"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,37 +124,57 @@ with col2:
 if generate_clicked:
     if not keyword.strip():
         st.error("Please enter a keyword first.")
-    elif not os.environ.get("GOOGLE_API_KEY"):
+    elif not os.getenv("GOOGLE_API_KEY"):
         st.error("Please provide a Google API key in the sidebar.")
     else:
-        with st.status("Generating your blog post...", expanded=True) as status:
-            try:
-                st.write("🧠 Planning (title, outline, tags) — JSON...")
-                result = generate_blog(
-                    keyword=keyword.strip(),
-                    tone=tone,
-                    audience=audience,
-                    length=length,
-                )
-                st.write("✍️ Drafting sections — JSON...")
-                st.write("🪄 Polishing final structured blog — JSON...")
-                status.update(label="Blog generated!", state="complete")
+        with st.spinner("Checking for existing similar blogs..."):
+            exists, message, details = isblogexist(keyword.strip())
 
-                final_blog = result.get("final_blog")
-                if not final_blog:
-                    raise ValueError("No structured blog was returned by the pipeline.")
+        if exists:
+            st.error(f"⚠️ A similar blog already exists: {message}")
 
-                st.session_state.history.insert(
-                    0,
-                    {
-                        "keyword": keyword.strip(),
-                        "blog": final_blog,  # structured dict
-                        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    },
-                )
-            except Exception as e:
-                status.update(label="Generation failed", state="error")
-                st.exception(e)
+            if details:
+                verdict = details["verdict"]
+                with st.expander("Why this was flagged as a duplicate", expanded=True):
+                    st.markdown(f"**Matched post:** {verdict.matched_title}")
+                    if verdict.matched_url:
+                        st.markdown(f"**URL:** {verdict.matched_url}")
+                    st.markdown(f"**Confidence:** {verdict.confidence:.0%}")
+                    st.markdown(f"**Reasoning:** {verdict.reasoning}")
+
+                    st.divider()
+                    st.caption("Other semantically similar posts considered:")
+                    for c in details["candidates"]:
+                        st.caption(f"- {c['title']} (distance={c['vector_distance']}) → {c['url']}")
+        else:
+            with st.status("Generating your blog post...", expanded=True) as status:
+                    try:
+                        st.write("🧠 Planning (title, outline, tags) — JSON...")
+                        result = generate_blog(
+                            keyword=keyword.strip(),
+                            tone=tone,
+                            audience=audience,
+                            length=length,
+                        )
+                        st.write("✍️ Drafting sections — JSON...")
+                        st.write("🪄 Polishing final structured blog — JSON...")
+                        status.update(label="Blog generated!", state="complete")
+
+                        final_blog = result.get("final_blog")
+                        if not final_blog:
+                            raise ValueError("No structured blog was returned by the pipeline.")
+
+                        st.session_state.history.insert(
+                            0,
+                            {
+                                "keyword": keyword.strip(),
+                                "blog": final_blog,  # structured dict
+                                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            },
+                        )
+                    except Exception as e:
+                        status.update(label="Generation failed", state="error")
+                        st.exception(e)
 
 # ---------------------------------------------------------------------------
 # Display latest / history
