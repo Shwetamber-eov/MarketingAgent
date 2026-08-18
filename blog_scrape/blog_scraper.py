@@ -25,9 +25,12 @@ import sys
 import time
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
+from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 BASE_LISTING_URL = "https://embarkingonvoyage.com/blog/"
 USER_AGENT = "Mozilla/5.0 (compatible; BlogScraperBot/1.0)"
@@ -125,7 +128,7 @@ def scrape_all_pages(start_url, max_pages=None, fetch_full_content=False):
     current_url = start_url
     page_num = 1
 
-    while current_url:
+    while current_url and page_num<=5:
         if max_pages and page_num > max_pages:
             break
         if not can_fetch(current_url):
@@ -186,7 +189,7 @@ def main():
     parser.add_argument("--url", default=BASE_LISTING_URL, help="Listing page to start from")
     parser.add_argument("--pages", type=int, default=None, help="Max number of listing pages to crawl (default: all ~102)")
     parser.add_argument("--full-content", action="store_true", help="Also visit each post to scrape the full article body (slower — ~600+ extra requests)")
-    parser.add_argument("--output", default="blog_posts.csv", help="Output file path (.csv or .json)")
+    parser.add_argument("--output", default="data/blog_posts.csv", help="Output file path (.csv or .json)")
     args = parser.parse_args()
 
     posts = scrape_all_pages(args.url, max_pages=args.pages, fetch_full_content=args.full_content)
