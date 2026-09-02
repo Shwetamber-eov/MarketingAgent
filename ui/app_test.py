@@ -249,8 +249,17 @@ elif st.session_state.flow_state == "awaiting_merge_keyword":
 if st.session_state.history:
     latest = st.session_state.history[0]
     blog = latest["blog"]
-    st.write("send blog to user button")
-    st.button("Send Email", on_click=send_blog_email(blog_markdown=blog_json_to_markdown(blog), title=blog.get("title")))
+    st.write("Send blog to user")
+    if st.button("Send Email"):
+        success = send_blog_email(
+            blog_markdown=blog_json_to_markdown(blog),
+            title=blog.get("title")
+        )
+        if success:
+            st.success("Email sent successfully!")
+        else:
+            st.error("Failed to send email.")
+
     #on_click only supports function not its return value
     print("after sending mail")
     st.divider()
