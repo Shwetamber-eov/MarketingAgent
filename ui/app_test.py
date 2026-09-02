@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from backend.graph import generate_blog
-from backend.tools import isblogexist
+from backend.tools import isblogexist, send_blog_email
 load_dotenv()
 
 st.set_page_config(
@@ -249,7 +249,10 @@ elif st.session_state.flow_state == "awaiting_merge_keyword":
 if st.session_state.history:
     latest = st.session_state.history[0]
     blog = latest["blog"]
-
+    st.write("send blog to user button")
+    st.button("Send Email", on_click=send_blog_email(blog_markdown=blog_json_to_markdown(blog), title=blog.get("title")))
+    #on_click only supports function not its return value
+    print("after sending mail")
     st.divider()
     st.subheader(blog["title"])
     st.caption(

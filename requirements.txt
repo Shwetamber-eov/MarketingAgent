@@ -13,3 +13,4 @@ langchain-ollama
 chromadb 
 pandas 
 pydantic
+markdown
