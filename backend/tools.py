@@ -228,11 +228,11 @@ def send_blog_email(
                 recipient_email,
                 msg.as_string()
             )
-        # return True
+        return True
 
     except Exception as e:
-        print(f"Failed to send email: {e}")
-        # return False
+        print(f":::::::::::::::::::::::::::::::::\nFailed to send email: {e}\n:::::::::::::::::::::::::::::::::::::::::::")
+        return False
 
 if __name__ == "__main__":
     # Run once (or whenever blog_posts.csv is refreshed) to (re)populate the vector store:

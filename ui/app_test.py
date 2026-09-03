@@ -255,6 +255,8 @@ if st.session_state.history:
             blog_markdown=blog_json_to_markdown(blog),
             title=blog.get("title")
         )
+        
+        print("::::::::::::::: success is ",success)
         if success:
             st.success("Email sent successfully!")
         else:
