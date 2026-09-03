@@ -36,13 +36,18 @@ services:
       - blog-net
 
   scraper:
-    build: .
-    container_name: blog-scraper
-    volumes:
-      - ./data:/app/data
-    command: ["python", "blog_scrape/blog_scraper.py", "--output", "data/blog_posts.csv"]
-    networks:
-      - blog-net
+     build: .
+     container_name: blog-scraper
+     restart: unless-stopped          # <-- add this, so it survives reboots/crashes
+     volumes:
+       - ./data:/app/data
+     command: ["python", "blog_scrape/scheduler.py"]   # <-- was blog_scraper.py directly
+     environment:                     # <-- optional, has sane defaults already
+       - SCRAPE_TIME=06:00
+       - OUTPUT_PATH=data/blog_posts.csv
+       - PAGES=10
+     networks:
+       - blog-net
 
   ingestor:
     build: .

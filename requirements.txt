@@ -12,5 +12,6 @@ langchain-chroma
 langchain-ollama 
 chromadb 
 pandas 
-pydantic
+pydantic6
 markdown
+schedule==1.2.2
