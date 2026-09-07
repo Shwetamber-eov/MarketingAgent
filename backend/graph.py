@@ -98,24 +98,6 @@ class BlogState(TypedDict, total=False):
     error: str
 
 
-# ---------------------------------------------------------------------------
-# LLM factory
-# ---------------------------------------------------------------------------
-# Model strings currently valid on the Gemini API (generativelanguage.googleapis.com)
-# for GOOGLE_MODEL. Gemma models are served through the same Gemini API/key, so no
-# separate credential is needed to switch between these.
-#   "gemini-3.5-flash-lite"  -> Google's hosted lite model. Best instruction-following
-#                                of the three for a nuanced formatting task like this,
-#                                and the cheapest/fastest. Recommended default.
-#   "gemma-4-31b-it"         -> Open-weight dense 31B model, native function calling.
-#                                Noticeably stronger reasoning/instruction-following
-#                                than gemma-3-12b-it, at higher latency/cost than
-#                                Flash-Lite.
-#   "gemma-3-12b-it"         -> Open-weight 12B model. Fastest/cheapest of the open
-#                                models but the weakest at following multi-part
-#                                formatting instructions (bullets/quotes/paragraph
-#                                length) under structured/function-calling output -
-#                                expect more misses on this task than the other two.
 _VALID_MODELS = {"gemini-3.5-flash-lite", "gemma-4-31b-it", "gemma-3-12b-it"}
 
 
