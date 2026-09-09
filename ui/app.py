@@ -1,12 +1,3 @@
-"""
-Streamlit dashboard: enter a keyword, generate a professional blog (as
-structured JSON) via LangChain + LangGraph + Gemini, and view/download
-the result.
-
-Run with:
-    streamlit run app.py
-"""
-
 import os
 import json
 import datetime
@@ -18,8 +9,9 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from backend.graph import generate_blog
-from backend.tools import isblogexist
+# from backend.graph import generate_blog
+from backend.graph_new import generate_blog
+from backend.tools import isblogexist, send_blog_email
 load_dotenv()
 
 st.set_page_config(
@@ -101,6 +93,40 @@ def blog_json_to_markdown(blog: dict) -> str:
     return "\n".join(lines)
 
 
+def run_generation(target_keyword: str):
+    """Run the Plan → Draft → Polish pipeline for `target_keyword` and push
+    the result onto history. Shared by both the fresh-keyword path and the
+    merged-keyword path (used after a duplicate is confirmed by the user)."""
+    with st.status("Generating your blog post...", expanded=True) as status:
+        try:
+            st.write("🧠 Planning (title, outline, tags) — JSON...")
+            result = generate_blog(
+                keyword=target_keyword,
+                tone=tone,
+                audience=audience,
+                length=length,
+            )
+            st.write("✍️ Drafting sections — JSON...")
+            st.write("🪄 Polishing final structured blog — JSON...")
+            status.update(label="Blog generated!", state="complete")
+
+            final_blog = result.get("final_blog")
+            if not final_blog:
+                raise ValueError("No structured blog was returned by the pipeline.")
+
+            st.session_state.history.insert(
+                0,
+                {
+                    "keyword": target_keyword,
+                    "blog": final_blog,  # structured dict
+                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                },
+            )
+        except Exception as e:
+            status.update(label="Generation failed", state="error")
+            st.exception(e)
+
+
 # ---------------------------------------------------------------------------
 # Main area
 # ---------------------------------------------------------------------------
@@ -109,6 +135,17 @@ st.caption("Powered by LangChain + LangGraph + Gemini · structured JSON output"
 
 if "history" not in st.session_state:
     st.session_state.history = []
+
+# Flow state for the duplicate-keyword handshake:
+#   "idle"                  -> normal state, nothing pending
+#   "duplicate_found"       -> a similar blog exists, waiting for yes/no
+#   "awaiting_merge_keyword"-> user said yes, waiting for a second keyword
+if "flow_state" not in st.session_state:
+    st.session_state.flow_state = "idle"
+if "pending_keyword" not in st.session_state:
+    st.session_state.pending_keyword = ""
+if "duplicate_info" not in st.session_state:
+    st.session_state.duplicate_info = None
 
 col1, col2 = st.columns([4, 1])
 with col1:
@@ -131,50 +168,81 @@ if generate_clicked:
             exists, message, details = isblogexist(keyword.strip())
 
         if exists:
-            st.error(f"⚠️ A similar blog already exists: {message}")
-
-            if details:
-                verdict = details["verdict"]
-                with st.expander("Why this was flagged as a duplicate", expanded=True):
-                    st.markdown(f"**Matched post:** {verdict.matched_title}")
-                    if verdict.matched_url:
-                        st.markdown(f"**URL:** {verdict.matched_url}")
-                    st.markdown(f"**Confidence:** {verdict.confidence:.0%}")
-                    st.markdown(f"**Reasoning:** {verdict.reasoning}")
-
-                    st.divider()
-                    st.caption("Other semantically similar posts considered:")
-                    for c in details["candidates"]:
-                        st.caption(f"- {c['title']} (distance={c['vector_distance']}) → {c['url']}")
+            # Don't generate yet — stash the duplicate info and ask the user
+            # whether they want to continue by merging in another keyword.
+            st.session_state.flow_state = "duplicate_found"
+            st.session_state.pending_keyword = keyword.strip()
+            st.session_state.duplicate_info = {"message": message, "details": details}
         else:
-            with st.status("Generating your blog post...", expanded=True) as status:
-                    try:
-                        st.write("🧠 Planning (title, outline, tags) — JSON...")
-                        result = generate_blog(
-                            keyword=keyword.strip(),
-                            tone=tone,
-                            audience=audience,
-                            length=length,
-                        )
-                        st.write("✍️ Drafting sections — JSON...")
-                        st.write("🪄 Polishing final structured blog — JSON...")
-                        status.update(label="Blog generated!", state="complete")
+            st.session_state.flow_state = "idle"
+            st.session_state.pending_keyword = ""
+            st.session_state.duplicate_info = None
+            run_generation(keyword.strip())
 
-                        final_blog = result.get("final_blog")
-                        if not final_blog:
-                            raise ValueError("No structured blog was returned by the pipeline.")
+# ---------------------------------------------------------------------------
+# Duplicate-keyword handshake UI
+# ---------------------------------------------------------------------------
+if st.session_state.flow_state == "duplicate_found":
+    info = st.session_state.duplicate_info
+    st.error(f"⚠️ A similar blog already exists for **{st.session_state.pending_keyword}**: {info['message']}")
 
-                        st.session_state.history.insert(
-                            0,
-                            {
-                                "keyword": keyword.strip(),
-                                "blog": final_blog,  # structured dict
-                                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            },
-                        )
-                    except Exception as e:
-                        status.update(label="Generation failed", state="error")
-                        st.exception(e)
+    if info["details"]:
+        verdict = info["details"]["verdict"]
+        with st.expander("Why this was flagged as a duplicate", expanded=True):
+            st.markdown(f"**Matched post:** {verdict.matched_title}")
+            if verdict.matched_url:
+                st.markdown(f"**URL:** {verdict.matched_url}")
+            st.markdown(f"**Confidence:** {verdict.confidence:.0%}")
+            st.markdown(f"**Reasoning:** {verdict.reasoning}")
+
+            st.divider()
+            st.caption("Other semantically similar posts considered:")
+            for c in info["details"]["candidates"]:
+                st.caption(f"- {c['title']} (distance={c['vector_distance']}) → {c['url']}")
+
+    st.warning("Do you want to continue anyway? You can merge this keyword with another topic to make it more unique.")
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        if st.button("✅ Yes, add another keyword", use_container_width=True):
+            st.session_state.flow_state = "awaiting_merge_keyword"
+            st.rerun()
+    with col_no:
+        if st.button("❌ No, cancel", use_container_width=True):
+            st.session_state.flow_state = "idle"
+            st.session_state.pending_keyword = ""
+            st.session_state.duplicate_info = None
+            st.rerun()
+
+elif st.session_state.flow_state == "awaiting_merge_keyword":
+    st.info(f"Original keyword: **{st.session_state.pending_keyword}**")
+    extra_keyword = st.text_input(
+        "Enter another keyword/topic to combine with the original",
+        placeholder="e.g. indoor vertical farming",
+        key="extra_keyword_input",
+    )
+
+    col_merge, col_cancel = st.columns(2)
+    with col_merge:
+        merge_clicked = st.button("🔀 Merge & Generate Blog", use_container_width=True, type="primary")
+    with col_cancel:
+        cancel_clicked = st.button("Cancel", use_container_width=True)
+
+    if cancel_clicked:
+        st.session_state.flow_state = "idle"
+        st.session_state.pending_keyword = ""
+        st.session_state.duplicate_info = None
+        st.rerun()
+
+    if merge_clicked:
+        if not extra_keyword.strip():
+            st.error("Please enter an additional keyword before merging.")
+        else:
+            merged_keyword = f"{st.session_state.pending_keyword} {extra_keyword.strip()}"
+            st.session_state.flow_state = "idle"
+            st.session_state.pending_keyword = ""
+            st.session_state.duplicate_info = None
+            st.success(f"Generating a blog for the merged topic: **{merged_keyword}**")
+            run_generation(merged_keyword)
 
 # ---------------------------------------------------------------------------
 # Display latest / history
@@ -182,7 +250,21 @@ if generate_clicked:
 if st.session_state.history:
     latest = st.session_state.history[0]
     blog = latest["blog"]
+    st.write("Send blog to user")
+    if st.button("Send Email"):
+        success = send_blog_email(
+            blog_markdown=blog_json_to_markdown(blog),
+            title=blog.get("title")
+        )
+        
+        print("::::::::::::::: success is ",success)
+        if success:
+            st.success("Email sent successfully!")
+        else:
+            st.error("Failed to send email.")
 
+    #on_click only supports function not its return value
+    print("after sending mail")
     st.divider()
     st.subheader(blog["title"])
     st.caption(
