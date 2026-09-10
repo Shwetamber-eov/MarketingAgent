@@ -1,30 +1,8 @@
-"""
-Blog duplicate / overlap checker.
-
-Two-stage pipeline:
-  1. RETRIEVAL — ChromaDB semantic similarity search finds the top-k existing
-     blog posts whose embeddings are closest to the new keyword/topic.
-  2. JUDGMENT  — Gemini (via langchain_google_genai), given only those
-     candidates, decides whether any of them already cover the same intent
-     and meaning as the new keyword. No lexical/substring matching is used
-     anywhere in this pipeline.
-
-Requirements:
-    pip install langchain-chroma langchain-ollama langchain-google-genai chromadb pandas pydantic
-
-Environment variables:
-    CHROMA_HOST      (default: localhost)
-    CHROMA_PORT      (default: 8001)
-    OLLAMA_URL       (default: http://localhost:11434)
-    GOOGLE_API_KEY   or GEMINI_API_KEY — required, get one from Google AI Studio
-    GEMINI_MODEL     (default: gemini-2.5-flash)
-"""
-
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import markdown
-
+import requests
 import os
 from typing import Optional
 from dotenv import load_dotenv
@@ -36,8 +14,10 @@ from langchain_ollama import OllamaEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
+from backend.variables.prompts import TOP_KEYWORD_QUERY, GATHER_LINKS_QUERY
 load_dotenv()
 
+import serpapi
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -234,17 +214,62 @@ def send_blog_email(
         print(f":::::::::::::::::::::::::::::::::\nFailed to send email: {e}\n:::::::::::::::::::::::::::::::::::::::::::")
         return False
 
-if __name__ == "__main__":
-    # Run once (or whenever blog_posts.csv is refreshed) to (re)populate the vector store:
-    # ingest_blogs_to_chroma("blog_posts.csv")
 
-    keyword = "benefits of forward deployment engineering for enterprise software adoption"
-    exists, reason, details = isblogexist(keyword)
+def search_top_keywords(query):
+    SERP_API_KEY=os.getenv("SERP_API_KEY")
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google_ai_mode",
+        "q": query,
+        "api_key": SERP_API_KEY,
+        # India-focused search
+        "location": "India",
+        "gl": "in",
 
-    print(f"\nKeyword: {keyword}")
-    print(f"Exists:  {exists}")
-    print(f"Reason:  {reason}")
-    if details:
-        print("\nCandidates considered:")
-        for c in details["candidates"]:
-            print(f"  - {c['title']} (distance={c['vector_distance']}) -> {c['url']}")
+        # English-language decision-maker searches
+        "hl": "en",
+
+        # Structured response for your LangGraph/parser
+        "output": "json",
+
+        # Fresh research rather than cached result
+        "no_cache": True,
+    }
+    
+    try:
+            # Fire standard HTTPS web call directly to the engine
+        response = requests.get(url, params=params)
+            
+        if response.status_code != 200:
+            print(f"❌ SerpApi server rejected query. Code: {response.status_code}")
+            print(f"Server message: {response.text}")
+            return []
+        results = response.json()
+    except Exception as e:
+        print(f"Workflow execution pipeline failed: {e}")
+        return []
+    # print("result:::::::", results)
+    text_blocks = results["text_blocks"]
+    print(type(text_blocks))
+    # print(text_blocks)
+    # print("=============================\ntext:::::::::::",text_blocks)
+    return text_blocks
+
+# result=search_top_keywords(TOP_KEYWORD_QUERY)
+
+
+
+# if __name__ == "__main__":
+#     # Run once (or whenever blog_posts.csv is refreshed) to (re)populate the vector store:
+#     # ingest_blogs_to_chroma("blog_posts.csv")
+
+#     keyword = "benefits of forward deployment engineering for enterprise software adoption"
+#     exists, reason, details = isblogexist(keyword)
+
+#     print(f"\nKeyword: {keyword}")
+#     print(f"Exists:  {exists}")
+#     print(f"Reason:  {reason}")
+#     if details:
+#         print("\nCandidates considered:")
+#         for c in details["candidates"]:
+#             print(f"  - {c['title']} (distance={c['vector_distance']}) -> {c['url']}")
