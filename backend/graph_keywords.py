@@ -18,7 +18,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY is not set.")
 
-MODEL = "gemma-4-31b-it"
+MODEL = "gemini-3.5-flash-lite"
 
 # ---------------------------------------------------------
 # Gemini model

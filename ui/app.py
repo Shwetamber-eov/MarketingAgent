@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import concurrent.futures
 import streamlit as st
 from dotenv import load_dotenv
 from pathlib import Path
@@ -11,7 +12,13 @@ sys.path.insert(0, str(ROOT))
 
 # from backend.graph import generate_blog
 from backend.graph_new import generate_blog
-from backend.tools import isblogexist, send_blog_email, search_top_keywords
+from backend.graph_keywords import app as keyword_graph_app
+from backend.tools import (
+    isblogexist,
+    send_blog_email,
+    search_top_keywords,
+    gather_links,
+)
 load_dotenv()
 
 st.set_page_config(
@@ -43,7 +50,8 @@ with st.sidebar:
 
     model_name = st.text_input(
         "Gemini model name",
-        value=os.getenv("GEMMA_MODEL", "gemma-4-31b-it"),
+        # value=os.getenv("GEMMA_MODEL", "gemma-4-31b-it"),
+        value=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         help="Must match a model string your API key can access.",
     )
     # os.environ["GOOGLE_MODEL"] = model_name
@@ -60,7 +68,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("Pipeline: Plan → Draft → Visual Prompts → Polish → SEO Check (LangGraph)")
+    st.caption("Pipeline: Trending topic → Keyword Strategy + Link Research (parallel) → Plan → Draft → Visual Prompts → Polish → SEO Check (LangGraph)")
     st.caption("Every step returns structured JSON, not free text.")
     st.caption("Sections flagged as needing a diagram show a placeholder with the generated image prompt, right where the image belongs.")
 
@@ -114,6 +122,214 @@ def image_placeholder_markdown(section: dict, visual_map: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Trending-topic helpers
+# ---------------------------------------------------------------------------
+def topic_to_api_payload(topic: dict) -> str:
+    """The string passed to keyword_graph_app's `trending_search` input and
+    to gather_links' `query` param. For a topic picked from the trending
+    list, this is the ENTIRE opportunity block (JSON-stringified) so the
+    downstream graphs have full context (business problem, scores, buyer
+    stage, etc). For a manually typed topic, it's just that text."""
+    if topic["source"] == "trending":
+        return json.dumps(topic["raw_block"], ensure_ascii=False)
+    return topic["label"]
+
+
+def make_trending_topic(opportunity: dict) -> dict:
+    return {
+        "source": "trending",
+        "label": opportunity.get("normalized_topic") or opportunity.get("keyword", ""),
+        "raw_block": opportunity,
+    }
+
+
+def make_custom_topic(text: str) -> dict:
+    return {
+        "source": "custom",
+        "label": text.strip(),
+        "raw_block": None,
+    }
+
+
+def check_duplicate_and_advance(topic: dict):
+    """Runs isblogexist() on `topic`'s label. If a duplicate is found, stash
+    it and drop into the duplicate-resolution screen; otherwise move
+    straight to generation. Shared by the initial topic confirmation and by
+    every path that can produce a *new* topic afterwards (select different /
+    add your own), so the duplicate check loops until the user explicitly
+    continues anyway or cancels."""
+    with st.spinner("Checking for existing similar blogs..."):
+        exists, message, details = isblogexist(topic["label"])
+
+    st.session_state.pending_topic = topic
+    if exists:
+        st.session_state.duplicate_info = {"message": message, "details": details}
+        st.session_state.flow_state = "duplicate_found"
+    else:
+        st.session_state.duplicate_info = None
+        st.session_state.flow_state = "generating"
+
+
+def render_topic_selection():
+    """Main topic-picking screen: choose one of the fetched trending
+    opportunities, or type a topic of your own instead."""
+    data = st.session_state.trending_data or {}
+    summary = data.get("research_summary", {})
+    opportunities = data.get("top_opportunities", [])
+
+    if summary:
+        with st.expander("📋 Research context", expanded=False):
+            st.markdown(f"**Company:** {summary.get('company', '—')}")
+            st.markdown(f"**Market:** {summary.get('market', '—')}")
+            st.markdown(f"**Audiences:** {', '.join(summary.get('audiences', [])) or '—'}")
+            st.markdown(f"**Research date:** {summary.get('research_date', '—')}")
+            st.caption(summary.get("methodology_note", ""))
+
+    st.subheader("🎯 Pick a trending topic")
+
+    selected_idx = None
+    if opportunities:
+        selected_idx = st.selectbox(
+            "Trending opportunities",
+            options=list(range(len(opportunities))),
+            format_func=lambda i: f"{opportunities[i].get('normalized_topic', 'Untitled topic')}  (rank {opportunities[i].get('rank', i + 1)})",
+            key="topic_select_idx",
+        )
+        chosen = opportunities[selected_idx]
+        st.caption(f"Keyword: {chosen.get('keyword', '—')}")
+        with st.expander("More about this topic"):
+            st.markdown(f"**Search intent:** {chosen.get('search_intent', '—')}")
+            st.markdown(f"**Business problem:** {chosen.get('business_problem', '—')}")
+            st.markdown(f"**Suggested angle:** {chosen.get('suggested_blog_angle', '—')}")
+            st.markdown(f"**Overall priority score:** {chosen.get('overall_priority_score', '—')}")
+    else:
+        st.info("No trending opportunities were returned. Enter your own topic below.")
+
+    st.markdown("**Or type your own topic instead:**")
+    custom_text = st.text_input(
+        "Your own topic",
+        value="",
+        key="custom_topic_input",
+        placeholder="e.g. investment in FDE",
+        label_visibility="collapsed",
+    )
+
+    col_confirm, col_cancel = st.columns(2)
+    with col_confirm:
+        confirm_clicked = st.button("✅ Confirm topic", use_container_width=True, type="primary")
+    with col_cancel:
+        cancel_clicked = st.button("Cancel", use_container_width=True)
+
+    if confirm_clicked:
+        topic = None
+        if custom_text.strip():
+            topic = make_custom_topic(custom_text)
+        elif opportunities and selected_idx is not None:
+            topic = make_trending_topic(opportunities[selected_idx])
+        else:
+            st.error("Pick a trending topic or type your own before confirming.")
+
+        if topic is not None:
+            check_duplicate_and_advance(topic)
+            st.rerun()
+
+    if cancel_clicked:
+        st.session_state.flow_state = "idle"
+        st.session_state.trending_data = None
+        st.rerun()
+
+
+def render_duplicate_screen():
+    """Shown when isblogexist() flags the currently pending topic as a
+    duplicate. Lets the user continue anyway, go back and pick a different
+    trending topic, type a brand-new topic (fully replacing the flagged
+    one), or cancel out of the flow entirely."""
+    info = st.session_state.duplicate_info
+    topic_label = st.session_state.pending_topic["label"]
+    st.error(f"⚠️ A similar blog already exists for **{topic_label}**: {info['message']}")
+
+    if info["details"]:
+        verdict = info["details"]["verdict"]
+        with st.expander("Why this was flagged as a duplicate", expanded=True):
+            st.markdown(f"**Matched post:** {verdict.matched_title}")
+            if verdict.matched_url:
+                st.markdown(f"**URL:** {verdict.matched_url}")
+            st.markdown(f"**Confidence:** {verdict.confidence:.0%}")
+            st.markdown(f"**Reasoning:** {verdict.reasoning}")
+
+            st.divider()
+            st.caption("Other semantically similar posts considered:")
+            for c in info["details"]["candidates"]:
+                st.caption(f"- {c['title']} (distance={c['vector_distance']}) → {c['url']}")
+
+    st.warning("What would you like to do?")
+    col_a, col_b, col_c, col_d = st.columns(4)
+    with col_a:
+        continue_clicked = st.button("✅ Continue anyway", use_container_width=True, type="primary")
+    with col_b:
+        different_clicked = st.button("🔁 Different topic", use_container_width=True)
+    with col_c:
+        own_clicked = st.button("✏️ Add my own", use_container_width=True)
+    with col_d:
+        cancel_clicked = st.button("❌ Cancel", use_container_width=True)
+
+    if continue_clicked:
+        st.session_state.duplicate_info = None
+        st.session_state.flow_state = "generating"
+        st.rerun()
+
+    if different_clicked:
+        st.session_state.duplicate_info = None
+        st.session_state.pending_topic = None
+        st.session_state.flow_state = "topic_selection"
+        st.rerun()
+
+    if own_clicked:
+        st.session_state.duplicate_info = None
+        st.session_state.flow_state = "awaiting_replacement_topic"
+        st.rerun()
+
+    if cancel_clicked:
+        st.session_state.flow_state = "idle"
+        st.session_state.pending_topic = None
+        st.session_state.duplicate_info = None
+        st.session_state.trending_data = None
+        st.rerun()
+
+
+def render_replacement_topic_screen():
+    """Shown after 'Add your own topic' from the duplicate screen. Typing a
+    new topic here REPLACES the flagged one entirely (not merged with it)
+    and is re-checked for duplicates, looping back to the duplicate screen
+    again if it's also flagged."""
+    st.info(f"Replacing: **{st.session_state.pending_topic['label']}**")
+    new_text = st.text_input(
+        "Enter a new topic to use instead",
+        placeholder="e.g. AI-Native Product Engineering",
+        key="replacement_topic_input",
+    )
+    col_confirm, col_cancel = st.columns(2)
+    with col_confirm:
+        confirm_clicked = st.button("✅ Use this topic", use_container_width=True, type="primary")
+    with col_cancel:
+        cancel_clicked = st.button("Cancel", use_container_width=True)
+
+    if cancel_clicked:
+        st.session_state.flow_state = "idle"
+        st.session_state.pending_topic = None
+        st.session_state.duplicate_info = None
+        st.session_state.trending_data = None
+        st.rerun()
+
+    if confirm_clicked:
+        if not new_text.strip():
+            st.error("Please enter a topic before continuing.")
+        else:
+            check_duplicate_and_advance(make_custom_topic(new_text))
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def blog_json_to_markdown(blog: dict, visual_prompts: list = None) -> str:
@@ -143,16 +359,36 @@ def blog_json_to_markdown(blog: dict, visual_prompts: list = None) -> str:
     return "\n".join(lines)
 
 
-def run_generation(target_keyword: str):
-    """Run the Plan → Draft → Visual Prompts → Polish → SEO Check pipeline
-    for `target_keyword` and push the result onto history. Shared by both
-    the fresh-keyword path and the merged-keyword path (used after a
-    duplicate is confirmed by the user)."""
+def run_generation_pipeline(topic: dict):
+    """Runs keyword_graph_app (keyword strategy) and gather_links (internal
+    + external link research) in PARALLEL for `topic`, then feeds both
+    results into generate_blog() together, running the
+    Plan → Draft → Visual Prompts → Polish → SEO Check pipeline."""
+    label = topic["label"]
+    api_payload = topic_to_api_payload(topic)
+
     with st.status("Generating your blog post...", expanded=True) as status:
         try:
+            st.write("🧭 Researching keyword strategy + reference links (in parallel)...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                keyword_future = executor.submit(
+                    keyword_graph_app.invoke, {"trending_search": api_payload}
+                )
+                links_future = executor.submit(gather_links, query=label)
+                keyword_result = keyword_future.result()
+                # links_result = links_future.result()[0].get("code")
+                links_result = links_future.result()
+
+            keyword_strategy = keyword_result["keyword_strategy"]
+            internal_links = links_result.get("internal_links", [])
+            external_links = links_result.get("external_links", [])
+
             st.write("🧠 Planning (title, meta, slug, outline, tags) — JSON...")
             result = generate_blog(
-                keyword=target_keyword,
+                keyword=label,
+                keyword_strategy=keyword_strategy,
+                internal_links=internal_links,
+                external_links=external_links,
                 tone=tone,
                 audience=audience,
                 length=length,
@@ -183,11 +419,13 @@ def run_generation(target_keyword: str):
             st.session_state.history.insert(
                 0,
                 {
-                    "keyword": target_keyword,
+                    "keyword": label,
                     "blog": final_blog,           # structured dict
                     "visual_prompts": visual_prompts,  # [{heading, visual_type, image_prompt}, ...]
                     "seo_report": seo_report,      # {score, checks, failed_checks, ...}
                     "seo_fix_attempts": fix_attempts,
+                    "internal_links": internal_links,
+                    "external_links": external_links,
                     "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 },
             )
@@ -205,113 +443,52 @@ st.caption("Powered by LangChain + LangGraph + Gemini · structured JSON output"
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Flow state for the duplicate-keyword handshake:
-#   "idle"                  -> normal state, nothing pending
-#   "duplicate_found"       -> a similar blog exists, waiting for yes/no
-#   "awaiting_merge_keyword"-> user said yes, waiting for a second keyword
+# Flow state machine:
+#   "idle"                       -> show "Get top searches" button
+#   "topic_selection"            -> pick a trending topic, or type your own
+#   "duplicate_found"            -> a similar blog exists, waiting for a choice
+#   "awaiting_replacement_topic" -> user chose "add your own topic" from the
+#                                    duplicate screen; typing a brand-new
+#                                    topic that fully replaces the flagged one
+#   "generating"                 -> parallel keyword_graph_app + gather_links,
+#                                    then generate_blog
 if "flow_state" not in st.session_state:
     st.session_state.flow_state = "idle"
-if "pending_keyword" not in st.session_state:
-    st.session_state.pending_keyword = ""
+if "trending_data" not in st.session_state:
+    st.session_state.trending_data = None
+if "pending_topic" not in st.session_state:
+    st.session_state.pending_topic = None
 if "duplicate_info" not in st.session_state:
     st.session_state.duplicate_info = None
 
-col1, col2 = st.columns([4, 1])
-with col1:
-    keyword = st.text_input(
-        "Enter a keyword or topic",
-        placeholder="e.g. investment in FDE",
-    )
-with col2:
-    st.write("")
-    st.write("")
-    generate_clicked = st.button("Generate Blog 🚀", use_container_width=True, type="primary")
-
-if generate_clicked:
-    if not keyword.strip():
-        st.error("Please enter a keyword first.")
-    elif not os.getenv("GOOGLE_API_KEY"):
-        st.error("Please provide a Google API key in the sidebar.")
-    else:
-        with st.spinner("Checking for existing similar blogs..."):
-            exists, message, details = isblogexist(keyword.strip())
-
-        if exists:
-            # Don't generate yet — stash the duplicate info and ask the user
-            # whether they want to continue by merging in another keyword.
-            st.session_state.flow_state = "duplicate_found"
-            st.session_state.pending_keyword = keyword.strip()
-            st.session_state.duplicate_info = {"message": message, "details": details}
+if st.session_state.flow_state == "idle":
+    fetch_clicked = st.button("🔎 Get top searches", type="primary")
+    if fetch_clicked:
+        if not os.getenv("GOOGLE_API_KEY"):
+            st.error("Please provide a Google API key in the sidebar.")
         else:
-            st.session_state.flow_state = "idle"
-            st.session_state.pending_keyword = ""
-            st.session_state.duplicate_info = None
-            run_generation(keyword.strip())
-
-# ---------------------------------------------------------------------------
-# Duplicate-keyword handshake UI
-# ---------------------------------------------------------------------------
-if st.session_state.flow_state == "duplicate_found":
-    info = st.session_state.duplicate_info
-    st.error(f"⚠️ A similar blog already exists for **{st.session_state.pending_keyword}**: {info['message']}")
-
-    if info["details"]:
-        verdict = info["details"]["verdict"]
-        with st.expander("Why this was flagged as a duplicate", expanded=True):
-            st.markdown(f"**Matched post:** {verdict.matched_title}")
-            if verdict.matched_url:
-                st.markdown(f"**URL:** {verdict.matched_url}")
-            st.markdown(f"**Confidence:** {verdict.confidence:.0%}")
-            st.markdown(f"**Reasoning:** {verdict.reasoning}")
-
-            st.divider()
-            st.caption("Other semantically similar posts considered:")
-            for c in info["details"]["candidates"]:
-                st.caption(f"- {c['title']} (distance={c['vector_distance']}) → {c['url']}")
-
-    st.warning("Do you want to continue anyway? You can merge this keyword with another topic to make it more unique.")
-    col_yes, col_no = st.columns(2)
-    with col_yes:
-        if st.button("✅ Yes, add another keyword", use_container_width=True):
-            st.session_state.flow_state = "awaiting_merge_keyword"
-            st.rerun()
-    with col_no:
-        if st.button("❌ No, cancel", use_container_width=True):
-            st.session_state.flow_state = "idle"
-            st.session_state.pending_keyword = ""
-            st.session_state.duplicate_info = None
+            with st.spinner("Fetching trending topics..."):
+                trending_keywords=search_top_keywords()
+                print(type(trending_keywords))
+                print("================================\ntrending keywords: ",trending_keywords)
+                st.session_state.trending_data = trending_keywords
+            st.session_state.flow_state = "topic_selection"
             st.rerun()
 
-elif st.session_state.flow_state == "awaiting_merge_keyword":
-    st.info(f"Original keyword: **{st.session_state.pending_keyword}**")
-    extra_keyword = st.text_input(
-        "Enter another keyword/topic to combine with the original",
-        placeholder="e.g. indoor vertical farming",
-        key="extra_keyword_input",
-    )
+elif st.session_state.flow_state == "topic_selection":
+    render_topic_selection()
 
-    col_merge, col_cancel = st.columns(2)
-    with col_merge:
-        merge_clicked = st.button("🔀 Merge & Generate Blog", use_container_width=True, type="primary")
-    with col_cancel:
-        cancel_clicked = st.button("Cancel", use_container_width=True)
+elif st.session_state.flow_state == "duplicate_found":
+    render_duplicate_screen()
 
-    if cancel_clicked:
-        st.session_state.flow_state = "idle"
-        st.session_state.pending_keyword = ""
-        st.session_state.duplicate_info = None
-        st.rerun()
+elif st.session_state.flow_state == "awaiting_replacement_topic":
+    render_replacement_topic_screen()
 
-    if merge_clicked:
-        if not extra_keyword.strip():
-            st.error("Please enter an additional keyword before merging.")
-        else:
-            merged_keyword = f"{st.session_state.pending_keyword} {extra_keyword.strip()}"
-            st.session_state.flow_state = "idle"
-            st.session_state.pending_keyword = ""
-            st.session_state.duplicate_info = None
-            st.success(f"Generating a blog for the merged topic: **{merged_keyword}**")
-            run_generation(merged_keyword)
+elif st.session_state.flow_state == "generating":
+    run_generation_pipeline(st.session_state.pending_topic)
+    st.session_state.flow_state = "idle"
+    st.session_state.pending_topic = None
+    st.session_state.trending_data = None
 
 # ---------------------------------------------------------------------------
 # Display latest / history
@@ -433,4 +610,4 @@ if st.session_state.history:
                 st.caption(b["meta_description"])
                 st.divider()
 else:
-    st.info("Enter a keyword above and click **Generate Blog** to get started.")
+    st.info("Click **Get top searches** above to find a trending topic, or type your own once the list appears.")
