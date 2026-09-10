@@ -212,6 +212,7 @@ class BlogPost(BaseModel):
 # ---------------------------------------------------------------------------
 class BlogState(TypedDict, total=False):
     keyword: str
+    keyword_strategy: dict
     tone: str
     audience: str
     length: str          # "short" | "medium" | "long"
@@ -360,37 +361,90 @@ they want to try minimalist shoes.
 """
 
 
+def _summarize_keyword_strategy(strategy: dict, max_items: int = 6) -> str:
+    """
+    Compresses the keyword strategy into a compact, prompt-friendly block.
+    Caps each list so the plan prompt stays cheap - we only need enough
+    signal to steer the LLM, not the full keyword dump.
+    """
+    if not strategy:
+        return "No keyword strategy provided."
+
+    def _fmt(label, items):
+        items = (items or [])[:max_items]
+        return f"- {label}: {', '.join(items)}" if items else f"- {label}: (none)"
+
+    return "\n".join([
+        f"- Search intent: {strategy.get('search_intent', 'n/a')}",
+        _fmt("Primary keywords", strategy.get("primary_keywords")),
+        _fmt("Secondary keywords", strategy.get("secondary_keywords")),
+        _fmt("Long-tail keywords", strategy.get("long_tail_keywords")),
+        _fmt("Question keywords (use as subheadings/FAQ)", strategy.get("question_keywords")),
+        _fmt("Semantic/related terms (weave in naturally)", strategy.get("semantic_keywords")),
+        _fmt("Candidate titles", strategy.get("blog_title_ideas")),
+        _fmt("Content angles", strategy.get("content_angles")),
+    ])
+
+
 def plan_node(state: BlogState) -> BlogState:
+    print("==============================\n\n in planning node \n\n=====================================")
+    # now = datetime.now()
+    # print("Current Time:", now.strftime("%H:%M:%S"))
+    # start_time = time.perf_counter()
+
+    keyword_strategy = state.get("keyword_strategy") or {}
+    primary_keywords = keyword_strategy.get("primary_keywords") or []
+    # Prefer an explicit keyword if given, else fall back to the top primary keyword
+    focus_keyword = state.get("keyword") or (primary_keywords[0] if primary_keywords else "")
+    keyword_context = _summarize_keyword_strategy(keyword_strategy)
+
     structured_llm = get_structured_llm(BlogPlan, temperature=0.6)
     prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
                 "You are a professional content strategist and SEO "
-                "specialist. Given a focus keyword, produce a blog plan - "
-                "title, meta description, URL slug, section outline (3-6 "
-                "headings) atleast 1 section in such a way visual can be added"
-                "to it ex: architecture, dataflow diagram,etc, and tags - engineered to score 80+ on a Rank "
-                "Math-style SEO analysis.\n\n"
+                "specialist. Given a focus keyword and a keyword research "
+                "report, produce a blog plan - title, meta description, "
+                "URL slug, section outline (3-6 headings, at least 1 "
+                "section suited for a visual such as an architecture or "
+                "dataflow diagram), and tags - engineered to score 80+ on "
+                "a Rank Math-style SEO analysis.\n\n"
+                "Use the keyword research report as follows:\n"
+                "- Adapt one of the candidate titles, or write a better "
+                "one, working in the primary keyword.\n"
+                "- Fold secondary keywords into the meta description and "
+                "headings naturally (no stuffing).\n"
+                "- Turn a couple of the question keywords into "
+                "subheadings or an FAQ-style section where relevant.\n"
+                "- Use semantic/related terms to add topical depth across "
+                "the outline.\n"
+                "- Let the content angles guide the overall narrative "
+                "framing.\n\n"
                 "{seo_guidelines}",
             ),
             (
                 "human",
                 "Focus keyword: {keyword}\n"
                 "Target audience: {audience}\n"
-                "Tone: {tone}",
+                "Tone: {tone}\n\n"
+                "Keyword research report:\n{keyword_context}",
             ),
         ]
     )
     chain = prompt | structured_llm
     plan: BlogPlan = chain.invoke(
         {
-            "keyword": state["keyword"],
+            "keyword": focus_keyword,
             "audience": state.get("audience", "general readers"),
             "tone": state.get("tone", "professional"),
             "seo_guidelines": SEO_GUIDELINES,
+            "keyword_context": keyword_context,
         }
     )
+    # with PLAN_PATH.open("w") as json_file:
+    #     json.dump({"plan": plan.model_dump()}, json_file, indent=4)
+    # print(time.perf_counter() - start_time)
     return {"plan": plan.model_dump()}
 
 
@@ -846,6 +900,7 @@ def build_graph():
 
 def generate_blog(
     keyword: str,
+    keyword_strategy: dict,
     tone: str = "professional",
     audience: str = "general readers",
     length: str = "short",
