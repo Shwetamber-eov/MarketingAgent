@@ -254,8 +254,45 @@ def search_top_keywords(query):
     # print(text_blocks)
     # print("=============================\ntext:::::::::::",text_blocks)
     return text_blocks
-
 # result=search_top_keywords(TOP_KEYWORD_QUERY)
+
+def gather_links(query):
+    SERP_API_KEY=os.getenv("SERP_API_KEY")
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google_ai_mode",
+        "q": query,
+        "api_key": SERP_API_KEY,
+        # India-focused search
+        "location": "India",
+        "gl": "in",
+
+        # English-language decision-maker searches
+        "hl": "en",
+
+        # Structured response for your LangGraph/parser
+        "output": "json",
+
+        # Fresh research rather than cached result
+        "no_cache": True,
+    }
+    
+    try:
+            # Fire standard HTTPS web call directly to the engine
+        response = requests.get(url, params=params)
+            
+        if response.status_code != 200:
+            print(f"❌ SerpApi server rejected query. Code: {response.status_code}")
+            print(f"Server message: {response.text}")
+            return []
+        results = response.json()
+    except Exception as e:
+        print(f"Workflow execution pipeline failed: {e}")
+        return []
+    # print("result:::::::", results)
+    text_blocks = results["text_blocks"]
+    # print("=============================\ntext:::::::::::",text_blocks)
+    return text_blocks
 
 
 
