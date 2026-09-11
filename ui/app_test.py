@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 # from backend.graph import generate_blog
 from backend.graph_new import generate_blog
 from backend.tools import isblogexist, send_blog_email
+
 load_dotenv()
 
 st.set_page_config(
@@ -64,13 +65,6 @@ with st.sidebar:
     st.caption("Every step returns structured JSON, not free text.")
     st.caption("Sections flagged as needing a diagram show a placeholder with the generated image prompt, right where the image belongs.")
 
-# NOTE: the sidebar above is commented out, but `tone`, `audience`, and
-# `length` are still referenced later when calling generate_blog(). Defining
-# them here keeps the app runnable until the sidebar is switched back on —
-# swap these for the sidebar widgets whenever you re-enable that block.
-# tone = "professional"
-# audience = "general readers"
-# length = "medium"
 
 # ---------------------------------------------------------------------------
 # Visual-prompt helpers
@@ -220,7 +214,7 @@ col1, col2 = st.columns([4, 1])
 with col1:
     keyword = st.text_input(
         "Enter a keyword or topic",
-        placeholder="e.g. sustainable urban gardening",
+        placeholder="e.g. investment in FDE",
     )
 with col2:
     st.write("")

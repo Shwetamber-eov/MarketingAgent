@@ -19,6 +19,15 @@ from backend.tools import (
     search_top_keywords,
     gather_links,
 )
+from ui.helper_functions import (
+    VISUAL_TYPE_ICONS,
+    visual_type_label,
+    build_visual_prompt_map,
+    topic_to_api_payload,
+    make_trending_topic,
+    make_custom_topic,
+    blog_json_to_markdown
+)
 load_dotenv()
 
 st.set_page_config(
@@ -72,32 +81,36 @@ with st.sidebar:
     st.caption("Every step returns structured JSON, not free text.")
     st.caption("Sections flagged as needing a diagram show a placeholder with the generated image prompt, right where the image belongs.")
 
-# NOTE: the sidebar above is commented out, but `tone`, `audience`, and
-# `length` are still referenced later when calling generate_blog(). Defining
-# them here keeps the app runnable until the sidebar is switched back on —
-# swap these for the sidebar widgets whenever you re-enable that block.
-# tone = "professional"
-# audience = "general readers"
-# length = "medium"
+def render_replacement_topic_screen():
+    """Shown after 'Add your own topic' from the duplicate screen. Typing a
+    new topic here REPLACES the flagged one entirely (not merged with it)
+    and is re-checked for duplicates, looping back to the duplicate screen
+    again if it's also flagged."""
+    st.info(f"Replacing: **{st.session_state.pending_topic['label']}**")
+    new_text = st.text_input(
+        "Enter a new topic to use instead",
+        placeholder="e.g. AI-Native Product Engineering",
+        key="replacement_topic_input",
+    )
+    col_confirm, col_cancel = st.columns(2)
+    with col_confirm:
+        confirm_clicked = st.button("✅ Use this topic", use_container_width=True, type="primary")
+    with col_cancel:
+        cancel_clicked = st.button("Cancel", use_container_width=True)
 
-# ---------------------------------------------------------------------------
-# Visual-prompt helpers
-# ---------------------------------------------------------------------------
-VISUAL_TYPE_ICONS = {
-    "architecture_diagram": "🏗️",
-    "flow_diagram": "🔀",
-    "comparison_chart": "📊",
-    "illustration": "🎨",
-}
+    if cancel_clicked:
+        st.session_state.flow_state = "idle"
+        st.session_state.pending_topic = None
+        st.session_state.duplicate_info = None
+        st.session_state.trending_data = None
+        st.rerun()
 
-
-def visual_type_label(visual_type: str) -> str:
-    return (visual_type or "image").replace("_", " ").title()
-
-
-def build_visual_prompt_map(visual_prompts: list) -> dict:
-    """heading -> refined visual-prompt dict, for quick lookup while rendering."""
-    return {vp["heading"]: vp for vp in (visual_prompts or [])}
+    if confirm_clicked:
+        if not new_text.strip():
+            st.error("Please enter a topic before continuing.")
+        else:
+            check_duplicate_and_advance(make_custom_topic(new_text))
+            st.rerun()
 
 
 def render_image_placeholder(section: dict, visual_map: dict):
@@ -111,45 +124,6 @@ def render_image_placeholder(section: dict, visual_map: dict):
             st.markdown(f'> "{vp["image_prompt"]}"')
         else:
             st.caption("No refined image prompt was generated for this section.")
-
-
-def image_placeholder_markdown(section: dict, visual_map: dict) -> str:
-    """Same placeholder, as a Markdown blockquote, for the .md export."""
-    vp = visual_map.get(section["heading"])
-    label = visual_type_label(section.get("visual_type"))
-    prompt_text = vp["image_prompt"] if vp and vp.get("image_prompt") else "(no prompt generated)"
-    return f'> 🖼️ **[Image placeholder — {label}]**\n> "{prompt_text}"'
-
-
-# ---------------------------------------------------------------------------
-# Trending-topic helpers
-# ---------------------------------------------------------------------------
-def topic_to_api_payload(topic: dict) -> str:
-    """The string passed to keyword_graph_app's `trending_search` input and
-    to gather_links' `query` param. For a topic picked from the trending
-    list, this is the ENTIRE opportunity block (JSON-stringified) so the
-    downstream graphs have full context (business problem, scores, buyer
-    stage, etc). For a manually typed topic, it's just that text."""
-    if topic["source"] == "trending":
-        return json.dumps(topic["raw_block"], ensure_ascii=False)
-    return topic["label"]
-
-
-def make_trending_topic(opportunity: dict) -> dict:
-    return {
-        "source": "trending",
-        "label": opportunity.get("normalized_topic") or opportunity.get("keyword", ""),
-        "raw_block": opportunity,
-    }
-
-
-def make_custom_topic(text: str) -> dict:
-    return {
-        "source": "custom",
-        "label": text.strip(),
-        "raw_block": None,
-    }
-
 
 def check_duplicate_and_advance(topic: dict):
     """Runs isblogexist() on `topic`'s label. If a duplicate is found, stash
@@ -168,7 +142,6 @@ def check_duplicate_and_advance(topic: dict):
     else:
         st.session_state.duplicate_info = None
         st.session_state.flow_state = "generating"
-
 
 def render_topic_selection():
     """Main topic-picking screen: choose one of the fetched trending
@@ -238,7 +211,6 @@ def render_topic_selection():
         st.session_state.trending_data = None
         st.rerun()
 
-
 def render_duplicate_screen():
     """Shown when isblogexist() flags the currently pending topic as a
     duplicate. Lets the user continue anyway, go back and pick a different
@@ -295,68 +267,6 @@ def render_duplicate_screen():
         st.session_state.duplicate_info = None
         st.session_state.trending_data = None
         st.rerun()
-
-
-def render_replacement_topic_screen():
-    """Shown after 'Add your own topic' from the duplicate screen. Typing a
-    new topic here REPLACES the flagged one entirely (not merged with it)
-    and is re-checked for duplicates, looping back to the duplicate screen
-    again if it's also flagged."""
-    st.info(f"Replacing: **{st.session_state.pending_topic['label']}**")
-    new_text = st.text_input(
-        "Enter a new topic to use instead",
-        placeholder="e.g. AI-Native Product Engineering",
-        key="replacement_topic_input",
-    )
-    col_confirm, col_cancel = st.columns(2)
-    with col_confirm:
-        confirm_clicked = st.button("✅ Use this topic", use_container_width=True, type="primary")
-    with col_cancel:
-        cancel_clicked = st.button("Cancel", use_container_width=True)
-
-    if cancel_clicked:
-        st.session_state.flow_state = "idle"
-        st.session_state.pending_topic = None
-        st.session_state.duplicate_info = None
-        st.session_state.trending_data = None
-        st.rerun()
-
-    if confirm_clicked:
-        if not new_text.strip():
-            st.error("Please enter a topic before continuing.")
-        else:
-            check_duplicate_and_advance(make_custom_topic(new_text))
-            st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def blog_json_to_markdown(blog: dict, visual_prompts: list = None) -> str:
-    """Reassemble the structured JSON blog into a Markdown document, with an
-    image placeholder (quoting the generated prompt) inserted right after
-    the heading of any section that was flagged as needing a visual."""
-    visual_map = build_visual_prompt_map(visual_prompts)
-    lines = [f"# {blog['title']}", ""]
-    lines.append(f"_{blog['meta_description']}_")
-    lines.append("")
-    if blog.get("slug"):
-        lines.append(f"**Slug:** /{blog['slug']}  ")
-    lines.append(f"**Tags:** {', '.join(blog['tags'])}  ")
-    lines.append(f"**Estimated read time:** {blog['estimated_read_time_minutes']} min")
-    lines.append("")
-    for section in blog["sections"]:
-        lines.append(f"## {section['heading']}")
-        lines.append("")
-        if section.get("needs_visual"):
-            lines.append(image_placeholder_markdown(section, visual_map))
-            lines.append("")
-        lines.append(section["content"])
-        lines.append("")
-    lines.append("## Conclusion")
-    lines.append("")
-    lines.append(blog["conclusion"])
-    return "\n".join(lines)
 
 
 def run_generation_pipeline(topic: dict):

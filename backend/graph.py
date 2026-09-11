@@ -7,7 +7,7 @@ Pipeline:
     keyword
       -> plan_node            (JSON: title, meta_description, slug, outline, tags)
       -> draft_node           (JSON: sections[] with heading + content + visual flags)
-      -> visual_prompts_node  (JSON: refined image/diagram prompts, gemma-4-31b-it)
+      -> visual_prompts_node  (JSON: refined image/diagram prompts, gemini-3.5-flash-lite)
       -> polish_node          (JSON: final BlogPost - the complete structured blog)
       -> seo_check_node       (pure-Python Rank Math-style scoring, no LLM call)
           -> if score >= threshold or max attempts reached: END
@@ -31,7 +31,7 @@ Notes on visuals:
     `draft_node` flags which sections would benefit from a diagram/image and
     writes a rough one-line idea for each. `visual_prompts_node` then expands
     those rough ideas into full, production-ready image-generation prompts
-    using a fixed model (gemma-4-31b-it), stored in state["visual_prompts"].
+    using a fixed model (gemini-3.5-flash-lite), stored in state["visual_prompts"].
     This node ONLY generates prompt text - it does not call any image
     generation API. Wiring an actual image-gen node that consumes
     state["visual_prompts"] (one entry per flagged section) is a natural
@@ -230,7 +230,7 @@ _VALID_MODELS = {"gemini-3.5-flash-lite", "gemma-4-31b-it", "gemma-3-12b-it"}
 # Fixed model used specifically for expanding rough visual ideas into full
 # image-generation prompts - kept separate from GOOGLE_MODEL since this is a
 # smaller, distinct task from the main writing pipeline.
-VISUAL_PROMPT_MODEL = "gemma-4-31b-it"
+VISUAL_PROMPT_MODEL = "gemini-3.5-flash-lite"
 
 
 def get_llm(
@@ -545,7 +545,7 @@ def generate_visual_prompts_node(state: BlogState) -> BlogState:
     For every section the draft flagged as needing a visual, generate a
     refined, production-ready image/diagram-generation prompt.
 
-    Uses a fixed model (gemma-4-31b-it) regardless of GOOGLE_MODEL, since
+    Uses a fixed model (gemini-3.5-flash-lite) regardless of GOOGLE_MODEL, since
     prompt-writing for image generation is a distinct, smaller task from the
     main writing pipeline. This node ONLY produces prompt text - it does not
     call any image-generation API. A future node can consume

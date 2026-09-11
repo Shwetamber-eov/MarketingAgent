@@ -1,70 +1,3 @@
-"""
-LangGraph workflow for keyword -> professional, SEO-optimized blog post
-generation, using structured JSON output at every step (via Pydantic schemas
-+ Gemini's structured-output / function-calling mode).
-
-Pipeline:
-    keyword
-      -> plan_node            (JSON: title, meta_description, slug, outline, tags)
-      -> gather_links_node    (no LLM schema call - Google Search grounding via
-                                the raw google-genai client; finds real external
-                                sources + a real embarkingonvoyage.com page)
-      -> draft_node           (JSON: sections[] with heading + content + visual flags)
-      -> visual_prompts_node  (JSON: refined image/diagram prompts, gemini-3.5-flash-lite)
-      -> polish_node          (JSON: final BlogPost - the complete structured blog)
-      -> seo_check_node       (pure-Python Rank Math-style scoring, no LLM call)
-          -> if score >= threshold or max attempts reached: END
-          -> else: seo_fix_node (LLM revises only the failing checks) -> seo_check_node
-      -> END
-
-Every LLM call returns a validated Pydantic object (not raw text), so the
-final state is guaranteed well-formed JSON that's easy to render, store,
-or send to an API.
-
-Notes on the SEO scoring:
-    This pipeline has no live WordPress/Rank Math connection, so
-    `calculate_seo_score` approximates the core checks Rank Math's analyzer
-    runs (focus keyword in title/meta/slug/first-section/subheading, keyword
-    density, title/meta length, content length, structural richness, tag
-    count, internal/outbound links) using only the data this pipeline
-    produces. It won't be byte-for-byte identical to a live Rank Math score,
-    but it targets the same signals and is tuned to land in the 80+ range
-    when checks pass.
-
-Notes on visuals:
-    `draft_node` flags which sections would benefit from a diagram/image and
-    writes a rough one-line idea for each. `visual_prompts_node` then expands
-    those rough ideas into full, production-ready image-generation prompts
-    using a fixed model (gemini-3.5-flash-lite), stored in state["visual_prompts"].
-    This node ONLY generates prompt text - it does not call any image
-    generation API. Wiring an actual image-gen node that consumes
-    state["visual_prompts"] (one entry per flagged section) is a natural
-    next step and was intentionally left out for now.
-
-Notes on links (external + internal):
-    `gather_links_node` runs right after `plan_node` and populates
-    state["external_links"] / state["internal_links"] with REAL (title, url)
-    pairs found via Google Search grounding - NOT model-generated JSON.
-
-    Why a separate node instead of asking the writer LLM to "search and cite"
-    in one structured call: Google's API rejects requests that combine the
-    google_search tool with controlled generation (response_schema /
-    function-calling structured output) on most models - see the long
-    comment above `_grounded_search`. So this pipeline keeps grounding calls
-    schema-free and hands the resulting URLs to the (unrelated) structured
-    writer calls as plain context, which they're told to copy verbatim.
-
-    Internal links point at real embarkingonvoyage.com (EOV) pages: first
-    via a `site:embarkingonvoyage.com <keyword>` grounded search, falling
-    back to an LLM pick from EOV_SERVICE_CATALOG (a small, hand-verified
-    list of EOV's real service pages) if that search comes back empty.
-
-    Links are written into section content as plain Markdown
-    `[anchor text](url)`, the same way the pipeline already handles bullets/
-    tables/quotes. Use `markdown_links_to_html()` at render/publish time to
-    turn them into `<a href="...">` tags.
-"""
-
 import json
 import os
 import re
@@ -79,14 +12,30 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 
-# Raw google-genai client - used ONLY for Google Search-grounded calls (see
-# `_grounded_search`). Kept separate from the langchain_google_genai wrapper
-# used everywhere else, since grounding + structured output don't mix.
-from google import genai
-from google.genai import types as google_types
 from datetime import datetime
 from pathlib import Path
 import sys
+
+from backend.variables.prompts import (
+    SYSTEM_PROMPT_DRAFT, 
+    SYSTEM_PROMPT_PLAN, 
+    SYSTEM_PROMPT_IMAGE, 
+    SYSTEM_PROMPT_POLISH, 
+    SYSTEM_PROMPT_FIX,
+    SEO_GUIDELINES,
+    VISUAL_PROMPT_MODEL,
+    _VALID_MODELS,
+    )
+from backend.variables.structured_output_description import SECTION_CONTENT_DESCRIPTION
+from backend.variables.guidelines import (
+    SEO_GUIDELINES, 
+    FORMATTING_EXAMPLE,
+    MIN_TABLE_ROWS,
+    EOV_DOMAIN,
+    MAX_SEO_FIX_ATTEMPTS,
+    MIN_WORDS_BY_LENGTH,
+    SEO_SCORE_THRESHOLD,
+    LENGTH_WORDS)
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -146,47 +95,8 @@ class Section(BaseModel):
     heading: str = Field(description="Section heading, matches an outline item")
     content: str = Field(
         description=(
-            "Full section content in Markdown-safe plain text. Formatting rules "
-            "this field MUST follow: "
-            "(1) PARAGRAPHS: write in short paragraphs of 3-4 sentences, each "
-            "separated by a blank line ('\\n\\n'). Never write a block of text "
-            "longer than 4 sentences without breaking it into a new paragraph. "
-            "(2) LISTS: whenever the content naturally involves 3+ items, steps, "
-            "tips, features, or examples, format them as a Markdown bullet list "
-            "('- item') or numbered list ('1. item') instead of cramming them "
-            "into a sentence with commas. "
-            "(3) TABLES FOR DIFFERENCES: whenever the section compares two or "
-            "more items, options, tools, plans, or approaches across shared "
-            "attributes (e.g. 'X vs Y', pros and cons, before/after, pricing "
-            "tiers, feature comparisons), format that comparison as a Markdown "
-            "table with a header row ('| Header | Header |') and a separator "
-            "row ('|---|---|'). The table MUST contain at least 5 data rows "
-            "(not counting the header or separator row) - if you don't "
-            "naturally have 5 rows of real comparison points, add more "
-            "attributes/criteria to compare rather than submitting a short "
-            "table. Never bury a real comparison inside a paragraph or "
-            "bullet list, and never pad a table with filler/repetitive rows "
-            "just to hit the count. Skip this for sections with nothing to "
-            "compare, and never fabricate a comparison that isn't there. "
-            "(4) QUOTES: if a statistic, strong claim, or standout takeaway fits "
-            "the section, set it off as a Markdown block quote ('> text') - do "
-            "not force one into every section, and never invent a statistic or "
-            "attribute a quote to a real named person. "
-            "(5) LINKS: when a claim in this section is backed by one of the "
-            "external reference links you were given, or when EOV's services "
-            "(from the internal reference links you were given) are genuinely "
-            "relevant to what the section discusses, embed it inline as a "
-            "Markdown link ('[anchor text](URL)'). Use ONLY a URL from the "
-            "reference links you were given - never invent, guess, or modify "
-            "a URL. When you link to an EOV service, phrase it as a concrete "
-            "benefit to the reader (what EOV's service actually does for "
-            "them), not just a bare mention. Don't force a link into a "
-            "section with nothing relevant to link to, and don't repeat the "
-            "same link in multiple sections. "
-            "A well-formed section mixes these elements as needed; it is not "
-            "just a wall of prose."
-        )
-    )
+            SECTION_CONTENT_DESCRIPTION
+        ))
     needs_visual: bool = Field(
         default=False,
         description=(
@@ -196,8 +106,7 @@ class Section(BaseModel):
             "that a diagram would clarify better than text alone. Most "
             "sections do NOT need one; only flag sections where a visual "
             "adds real understanding (typically 0-2 per post)."
-        ),
-    )
+        ),)
     visual_type: str = Field(
         default="none",
         description=(
@@ -315,37 +224,10 @@ class BlogState(TypedDict, total=False):
     error: str
 
 
-_VALID_MODELS = {"gemini-3.5-flash-lite", "gemma-4-31b-it", "gemma-3-12b-it"}
-
-# Fixed model used specifically for expanding rough visual ideas into full
-# image-generation prompts - kept separate from GOOGLE_MODEL since this is a
-# smaller, distinct task from the main writing pipeline.
-# VISUAL_PROMPT_MODEL = "gemma-4-31b-it"
-VISUAL_PROMPT_MODEL = "gemini-3.5-flash-lite"
-
-# Fixed model used for Google Search-grounded link discovery. Confirmed to
-# support the built-in `google_search` tool. Kept separate from GOOGLE_MODEL
-# for the same reason as VISUAL_PROMPT_MODEL - distinct, smaller task.
-SEARCH_MODEL = "gemini-3.5-flash-lite"
-
-EOV_DOMAIN = "embarkingonvoyage.com"
-EXTERNAL_LINKS_PER_POST = 5
-MIN_TABLE_ROWS = 5
-
 
 def get_llm(
     temperature: float = 0.7, model_override: Optional[str] = None
 ) -> ChatGoogleGenerativeAI:
-    """
-    Builds the Gemini/Gemma chat model.
-
-    Reads the model name from the GOOGLE_MODEL env var (defaults to
-    "gemini-3.5-flash-lite" if unset) so you can point this at whichever of
-    the supported model strings you want without touching code. Pass
-    model_override to pin a specific call to a different model regardless of
-    the env var (used by the visual-prompt node, which always uses a smaller
-    Gemma model).
-    """
     model_name = model_override or os.getenv("GOOGLE_MODEL", "gemini-3.5-flash-lite")
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
@@ -353,8 +235,6 @@ def get_llm(
             "GOOGLE_API_KEY is not set. Add it to your .env file or environment."
         )
     if model_name not in _VALID_MODELS:
-        # Not fatal - Google may add new model strings after this was written -
-        # but flag it since a typo'd model name is a common silent failure mode.
         print(
             f"[warning] model={model_name!r} is not one of the models this "
             f"workflow was tuned against ({sorted(_VALID_MODELS)}). Proceeding anyway."
@@ -373,13 +253,7 @@ def get_structured_llm(
 ):
     """Returns an LLM bound to always respond with the given Pydantic schema."""
     llm = get_llm(temperature=temperature, model_override=model_override)
-    # Uses function-calling / tool-mode structured output under the hood,
-    # which Gemini/Gemma models support via langchain_google_genai. The return
-    # value is a validated instance of `schema`, not raw text.
     return llm.with_structured_output(schema)
-
-
-
 
 
 def _format_links_for_prompt(links: List[Dict[str, Any]]) -> str:
@@ -387,8 +261,6 @@ def _format_links_for_prompt(links: List[Dict[str, Any]]) -> str:
         return "(none found for this post - do not fabricate any links in this category)"
     formatted = []
     for link in links:
-        # Extract raw URL from Markdown format:
-        # [https://example.com](https://example.com)
         raw_url = link.get("url", "")
         markdown_match = re.match(r"\[.*?\]\((.*?)\)", raw_url)
 
@@ -424,110 +296,8 @@ def _format_links_for_prompt(links: List[Dict[str, Any]]) -> str:
             )
     return "\n".join(formatted)
 
-# ---------------------------------------------------------------------------
-# Shared SEO guidance, injected into plan/draft/polish/fix prompts
-# ---------------------------------------------------------------------------
-SEO_GUIDELINES = """\
-This content must be optimized to score 80+ on a Rank Math-style SEO \
-analysis. Use the exact FOCUS KEYWORD given to you, verbatim (same wording/ \
-casing - do not swap in a synonym or a different grammatical form):
-
-1. The focus keyword must appear in the SEO title, ideally within the first \
-   half of the title.
-2. The focus keyword must appear in the meta description.
-3. The focus keyword must appear naturally within the first 10% of the \
-   article's body content (i.e. early in the first section).
-4. The focus keyword must appear in at least one subheading (section heading).
-5. Keyword density across the full article should land between 0.6% and \
-   2.0% of total words - enough to be findable, never stuffed.
-6. The SEO title should be 50-60 characters long.
-7. The meta description should be 120-160 characters long.
-8. The URL slug must be a short, lowercase, hyphenated version of the title \
-   that includes the focus keyword.
-9. The article must contain at least one outbound link to a reputable \
-   external source and at least one internal link to embarkingonvoyage.com.
-"""
-
-# ---------------------------------------------------------------------------
-# Node config
-# ---------------------------------------------------------------------------
-LENGTH_WORDS = {
-    "short": "200-250",
-    "medium": "300-500",
-    "long": "600-800",
-}
-
-MIN_WORDS_BY_LENGTH = {
-    "short": 300,
-    "medium": 600,
-    "long": 900,
-}
-
-SEO_SCORE_THRESHOLD = 80
-MAX_SEO_FIX_ATTEMPTS = 2
-
-# A concrete worked example of the expected formatting. Small/lite models follow
-# a demonstrated pattern far more reliably than an abstract list of rules, so this
-# is included directly in the draft prompt.
-FORMATTING_EXAMPLE = """\
-Example of correctly formatted section content (for a section about "choosing a \
-running shoe"):
-
-Picking the right running shoe comes down to matching the shoe to your gait and \
-mileage, not just the brand. Most runners fall into one of three categories: \
-neutral, overpronator, or supinator. Getting a gait analysis at a specialty running \
-store is the fastest way to find out which one you are.
-
-Once you know your gait type, a few features matter more than the rest:
-
-- **Cushioning**: more cushioning reduces impact on long runs but can feel less responsive
-- **Drop**: the heel-to-toe height difference, usually 0-12mm
-- **Stability**: added support for overpronators, usually a firmer foam wedge
-
-> Runners who replace shoes every 300-500 miles report noticeably fewer overuse \
-injuries than those who run shoes into the ground.
-
-Try on shoes later in the day, when your feet are slightly swollen, and always \
-walk or jog a few steps in-store before buying.
-
-Example of a section that correctly uses a TABLE because it compares options - note \
-it has 5 data rows, the required minimum \
-(for a section about "cushioned vs minimalist running shoes"):
-
-Choosing between cushioned and minimalist shoes comes down to how your feet \
-currently handle impact, not personal preference alone. The table below lays \
-out how the two styles differ on the factors that matter most.
-
-| Factor | Cushioned | Minimalist |
-|---|---|---|
-| Heel-to-toe drop | 8-12mm | 0-4mm |
-| Best for | Long-distance, road running | Short runs, strength-focused training |
-| Injury risk if switching too fast | Low | Higher without a gradual transition |
-| Typical price range | $120-$180 | $90-$140 |
-| Break-in period | Minimal | 2-4 weeks, gradual |
-
-Most runners are better off starting cushioned and transitioning gradually if \
-they want to try minimalist shoes.
-
-Example of naturally citing an external source and linking to a relevant EOV \
-service with a concrete benefit (use ONLY the URLs you are actually given for \
-the real post - these two are illustrative placeholders, not real ones to reuse):
-
-Teams that skip structured gait analysis entirely see far higher return rates \
-on running shoes, according to [industry retail research](https://example.com/research). \
-If your team is building a fitting tool like this in-house, EOV's \
-[AI-Native Digital Product Consulting](https://embarkingonvoyage.com/services/ainative-digital-product-consulting/) \
-service specializes in mapping a user journey like this before writing a \
-single line of code, which is usually the fastest way to avoid costly rework \
-later.
-"""
 
 def _summarize_keyword_strategy(strategy: dict, max_items: int = 6) -> str:
-    """
-    Compresses the keyword strategy into a compact, prompt-friendly block.
-    Caps each list so the plan prompt stays cheap - we only need enough
-    signal to steer the LLM, not the full keyword dump.
-    """
     if not strategy:
         return "No keyword strategy provided."
 
@@ -547,7 +317,6 @@ def _summarize_keyword_strategy(strategy: dict, max_items: int = 6) -> str:
     ])
 
 
-
 def plan_node(state: BlogState) -> BlogState:
     print("==============================\n\n in planning node \n\n=====================================")
     # now = datetime.now()
@@ -565,25 +334,7 @@ def plan_node(state: BlogState) -> BlogState:
         [
             (
                 "system",
-                "You are a professional content strategist and SEO "
-                "specialist. Given a focus keyword and a keyword research "
-                "report, produce a blog plan - title, meta description, "
-                "URL slug, section outline (3-6 headings, at least 1 "
-                "section suited for a visual such as an architecture or "
-                "dataflow diagram), and tags - engineered to score 80+ on "
-                "a Rank Math-style SEO analysis.\n\n"
-                "Use the keyword research report as follows:\n"
-                "- Adapt one of the candidate titles, or write a better "
-                "one, working in the primary keyword.\n"
-                "- Fold secondary keywords into the meta description and "
-                "headings naturally (no stuffing).\n"
-                "- Turn a couple of the question keywords into "
-                "subheadings or an FAQ-style section where relevant.\n"
-                "- Use semantic/related terms to add topical depth across "
-                "the outline.\n"
-                "- Let the content angles guide the overall narrative "
-                "framing.\n\n"
-                "{seo_guidelines}",
+                SYSTEM_PROMPT_PLAN,
             ),
             (
                 "human",
@@ -620,94 +371,14 @@ def draft_node(state: BlogState) -> BlogState:
     start_time = time.perf_counter()
     structured_llm = get_structured_llm(BlogSections, temperature=0.7)
     length = state.get("length", "medium")
-    word_target = LENGTH_WORDS.get(length, LENGTH_WORDS["short"])
+    word_target = LENGTH_WORDS.get(length, LENGTH_WORDS["medium"])
     plan = state["plan"]
 
     prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                "You are a professional blog writer. Write clear, engaging, "
-                "well-structured content for each section heading provided. "
-                "Combined, all sections should total roughly {word_target} words.\n\n"
-
-                "{seo_guidelines}\n\n"
-
-                "Weave the exact focus keyword '{keyword}' naturally into the "
-                "content - it MUST appear within the FIRST section (the first "
-                "10% of the article) - and keep overall keyword density "
-                "between 0.6% and 2.0% of total words. Never stuff it "
-                "unnaturally.\n\n"
-
-                "You MUST follow these formatting rules in every section:\n\n"
-
-                "1. SHORT PARAGRAPHS - Write 3-4 sentences, then insert a blank "
-                "line and start a new paragraph. Do not write a single block of "
-                "5+ sentences under any circumstances. A section is normally "
-                "2-4 short paragraphs, not one long one.\n\n"
-
-                "2. BULLETS WHEN LISTING - If you are describing 3 or more items, "
-                "steps, tips, features, or examples, you MUST format them as a "
-                "Markdown bullet list ('- item') or numbered list ('1. item'). "
-                "Do not describe a list of items inside a paragraph using commas. "
-                "Skip this rule for sections that genuinely have nothing to list.\n\n"
-
-                "3. TABLES FOR DIFFERENCES - whenever a section compares two or "
-                "more items, options, tools, plans, or approaches across shared "
-                "attributes (e.g. 'X vs Y', pros/cons, before/after, pricing "
-                "tiers, feature comparisons), format that comparison as a "
-                "Markdown table with a header row and a separator row. The "
-                "table MUST have at least 5 data rows (not counting the header/ "
-                "separator) - find at least 5 real attributes or criteria to "
-                "compare rather than submitting a short table, but never pad "
-                "with filler or repetitive rows just to hit the count. Never "
-                "bury a real comparison in a paragraph or bullet list. Skip "
-                "this for sections with nothing to compare.\n\n"
-
-                "4. ONE BLOCK QUOTE WHEN IT FITS - If a section contains a "
-                "statistic, a strong claim, or a summarizing takeaway, set it "
-                "off using a Markdown block quote ('> text'). Do not force a "
-                "quote into a section where nothing warrants it, and never "
-                "invent a statistic or attribute a statement to a real named "
-                "person.\n\n"
-
-                "5. LINKS - You are given a list of real EXTERNAL reference "
-                "links and a list of real INTERNAL (embarkingonvoyage.com / "
-                "EOV) reference links below. Where a claim in a section is "
-                "genuinely backed by one of the external links, or where one "
-                "of EOV's services is genuinely relevant to what a section "
-                "discusses, embed it inline as a Markdown link "
-                "('[anchor text](URL)'), using the URL EXACTLY as given - "
-                "never invent, guess, or alter a URL, and never link to "
-                "anything not in these lists. When you link to an EOV "
-                "service, phrase it around a concrete benefit to the reader "
-                "(what that service actually does for them), not a bare "
-                "mention. Aim to naturally use 2-3 of the external links and "
-                "at least 1 of the internal links across the whole post - "
-                "spread across different sections, never more than one link "
-                "per section, and never force a link into a section with "
-                "nothing relevant to link to.\n\n"
-
-                "External reference links (only these URLs, or none):\n"
-                "{external_links_block}\n\n"
-                "Internal EOV reference links (only these URLs, or none):\n"
-                "{internal_links_block}\n\n"
-
-                "For EACH section, also decide whether it needs an "
-                "accompanying visual: set needs_visual=true ONLY if the "
-                "section describes a system/architecture, a step-by-step "
-                "process or flow, or a comparison that a diagram would "
-                "meaningfully clarify (typically 0-2 sections per post, not "
-                "every section). When true, set visual_type and write a "
-                "brief visual_idea; otherwise leave needs_visual=false, "
-                "visual_type='none', visual_idea=''.\n\n"
-
-                "Do not add a heading of your own - the section heading is "
-                "already provided separately, and it must match the outline "
-                "exactly.\n\n"
-                "not necessary to add bullet points, tables, links, or a "
-                "visual in every section.\n"
-                "{formatting_example}",
+                SYSTEM_PROMPT_DRAFT,
             ),
             (
                 "human",
@@ -741,16 +412,6 @@ def draft_node(state: BlogState) -> BlogState:
 
 
 def generate_visual_prompts_node(state: BlogState) -> BlogState:
-    """
-    For every section the draft flagged as needing a visual, generate a
-    refined, production-ready image/diagram-generation prompt.
-
-    Uses a fixed model (gemini-3.5-flash-lite) regardless of GOOGLE_MODEL, since
-    prompt-writing for image generation is a distinct, smaller task from the
-    main writing pipeline. This node ONLY produces prompt text - it does not
-    call any image-generation API. A future node can consume
-    state["visual_prompts"] to actually generate images.
-    """
     print("==============================\n\n in generate prompt node \n\n=====================================")
     now = datetime.now()
 
@@ -772,14 +433,7 @@ def generate_visual_prompts_node(state: BlogState) -> BlogState:
         [
             (
                 "system",
-                "You write detailed, production-ready prompts for an image/"
-                "diagram-generation model, based on a rough idea. For each "
-                "section provided, expand its rough visual_idea into a full "
-                "image_prompt: describe every element, label, and connector "
-                "that should appear, and specify a clean, professional "
-                "visual style suited to a blog post titled '{title}'. Keep "
-                "the visual_type as given for each section. Return one "
-                "entry per section, in the same order.",
+                SYSTEM_PROMPT_IMAGE,
             ),
             (
                 "human",
@@ -812,58 +466,14 @@ def polish_node(state: BlogState) -> BlogState:
     structured_llm = get_structured_llm(BlogPost, temperature=0.4)
     plan = state["plan"]
     sections = state["sections"]
-
+    length = state.get("length", "medium")
+    word_target = LENGTH_WORDS.get(length, LENGTH_WORDS["medium"])
+    print("============================================\nword target", word_target)
     prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                "You are a professional editor and SEO specialist. You are "
-                "given a blog plan and drafted sections. Improve clarity, "
-                "flow, grammar, and professionalism of every section's "
-                "content while preserving meaning and structure.\n\n"
-
-                "{seo_guidelines}\n\n"
-
-                "The focus keyword is '{keyword}' - keep it present in the "
-                "title, meta description, slug, at least one subheading, and "
-                "the first section, at a natural density of 0.6%-2.0%. Never "
-                "remove existing keyword instances unless there is clear "
-                "stuffing.\n\n"
-
-                "CRITICAL - do not flatten formatting: the drafts may already "
-                "contain short paragraphs, Markdown bullet lists ('- item'), "
-                "Markdown tables (each with at least 5 data rows), Markdown "
-                "links ('[text](url)'), or block quotes ('> text'). You must "
-                "PRESERVE these - never merge a bullet list, table, or block "
-                "quote back into a plain paragraph, never drop a data row "
-                "from a table below the 5-row minimum, and never strip or "
-                "rewrite a Markdown link's URL. Keep the 3-4 sentence "
-                "paragraph breaks intact. Never change a section's heading "
-                "text - it must match the original exactly.\n\n"
-
-                "If a section is a wall of prose with no formatting and it "
-                "contains 3+ listable items, convert that list into a "
-                "Markdown bullet list as part of your edit. If a section "
-                "describes a comparison or difference between two or more "
-                "things without a table, convert it into a Markdown table "
-                "with at least 5 data rows instead. If a section contains a "
-                "statistic or standout takeaway with no block quote, you may "
-                "add one - but never invent a statistic or attribute a quote "
-                "to a real named person. NEVER add a new link of your own - "
-                "only the links already present in the draft (or, if truly "
-                "needed, one of the reference links below) may appear.\n\n"
-
-                "Reference links available if a section still needs one "
-                "(use the URL EXACTLY as given, or not at all):\n"
-                "External: {external_links_block}\n"
-                "Internal (EOV): {internal_links_block}\n\n"
-
-                "Refine the URL slug if needed (lowercase, hyphenated, "
-                "contains the focus keyword). Write a short, strong "
-                "conclusion (4-5 sentences, plain prose, no bullets, tables, "
-                "or quotes). Estimate reading time in minutes from total "
-                "word count (assume ~150 words/minute). Return the complete "
-                "finished blog post as structured data.",
+                SYSTEM_PROMPT_POLISH,
             ),
             (
                 "human",
@@ -879,6 +489,7 @@ def polish_node(state: BlogState) -> BlogState:
     post: BlogPost = chain.invoke(
         {
             "title": plan["title"],
+            "word_target": word_target,
             "meta_description": plan["meta_description"],
             "slug": plan["slug"],
             "tags": ", ".join(plan["tags"]),
@@ -891,9 +502,6 @@ def polish_node(state: BlogState) -> BlogState:
     )
     post_dict = post.model_dump()
 
-    # Preserve the draft's visual-need assessment exactly - that decision was
-    # already finalized before visual_prompts_node ran off of it, so polish
-    # should not silently redecide (or drop) needs_visual/visual_type/idea.
     orig_by_heading = {s["heading"]: s for s in sections}
     for sec in post_dict["sections"]:
         orig = orig_by_heading.get(sec["heading"])
@@ -906,13 +514,11 @@ def polish_node(state: BlogState) -> BlogState:
     print(time.perf_counter()-start_time)
     return {"final_blog": post_dict}
 
-
 # ---------------------------------------------------------------------------
 # Rank Math-style SEO scoring (pure Python, no LLM calls)
 # ---------------------------------------------------------------------------
 def _word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", text))
-
 
 def _keyword_occurrences(text: str, keyword: str) -> int:
     """Case-insensitive count of the exact keyword phrase in text."""
@@ -921,24 +527,16 @@ def _keyword_occurrences(text: str, keyword: str) -> int:
     pattern = r"\b" + re.escape(keyword.strip()) + r"\b"
     return len(re.findall(pattern, text, flags=re.IGNORECASE))
 
-
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)")
-
 
 def _extract_markdown_links(text: str) -> List[tuple]:
     """Returns a list of (anchor_text, url) tuples found in Markdown-linked text."""
     return _MD_LINK_RE.findall(text or "")
 
-
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$")
 
 
 def _extract_markdown_tables(text: str) -> List[List[str]]:
-    """
-    Returns a list of tables found in `text`, each represented as its list of
-    data-row lines (header and separator rows excluded). Used to check the
-    "at least 5 data rows per table" rule without an LLM call.
-    """
     lines = (text or "").splitlines()
     tables: List[List[str]] = []
     i = 0
@@ -958,15 +556,6 @@ def _extract_markdown_tables(text: str) -> List[List[str]]:
 
 
 def calculate_seo_score(blog: dict, keyword: str, length: str = "medium") -> dict:
-    """
-    Approximates the core checks a Rank Math-style SEO analysis runs, using
-    only the data this pipeline produces (there's no live WordPress/Rank
-    Math connection here). Returns a report dict with a 0-100 score, a
-    per-check breakdown, and a list of failed checks with plain-language fix
-    instructions suitable for feeding straight back into an LLM revision
-    prompt (see seo_fix_node).
-    """
-
     title = blog.get("title", "")
     meta = blog.get("meta_description", "")
     slug = blog.get("slug", "")
@@ -1119,11 +708,6 @@ def seo_check_node(state: BlogState) -> BlogState:
 
 
 def seo_fix_node(state: BlogState) -> BlogState:
-    """
-    Feeds the specific failed checks from seo_check_node back into an LLM,
-    asking it to make the smallest edits necessary to fix them - rather than
-    a full rewrite - then hands control back to seo_check_node to re-score.
-    """
     print("==============================\n\n in seo fix node \n\n=====================================")
     now = datetime.now()
 
@@ -1135,25 +719,14 @@ def seo_fix_node(state: BlogState) -> BlogState:
     blog = state["final_blog"]
     report = state["seo_report"]
     fixes = "\n".join(f"- {f['check']}: {f['fix']}" for f in report["failed_checks"])
+    length = state.get("length", "medium")
+    word_target = LENGTH_WORDS.get(length, LENGTH_WORDS["medium"])
 
     prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                "You are an SEO editor. You are given a finished blog post "
-                "(as JSON) and a specific list of SEO issues to fix. Make "
-                "the smallest edits necessary to fix EVERY listed issue "
-                "while preserving the post's meaning, tone, and existing "
-                "Markdown formatting (paragraphs, bullet lists, tables with "
-                "at least 5 data rows, links, block quotes). Never change "
-                "section headings. Never invent statistics or attribute "
-                "quotes to real named people. If you need to add a link to "
-                "satisfy a fix, use ONLY a URL from the reference links "
-                "below - never invent or modify a URL. Return the complete "
-                "corrected blog post as structured data.\n\n"
-                "Reference links available if a fix requires adding one:\n"
-                "External: {external_links_block}\n"
-                "Internal (EOV): {internal_links_block}",
+                SYSTEM_PROMPT_FIX,
             ),
             (
                 "human",
@@ -1167,6 +740,7 @@ def seo_fix_node(state: BlogState) -> BlogState:
     revised: BlogPost = chain.invoke(
         {
             "keyword": state["keyword"],
+            "word_target": word_target,
             "fixes": fixes,
             "blog_json": json.dumps(blog, ensure_ascii=False),
             "external_links_block": _format_links_for_prompt(state.get("external_links", [])),
@@ -1204,19 +778,6 @@ def route_after_seo_check(state: BlogState) -> str:
 # Rendering helper: Markdown links -> HTML anchors
 # ---------------------------------------------------------------------------
 def markdown_links_to_html(text: str, new_tab: bool = True) -> str:
-    """
-    Converts every Markdown link '[anchor text](url)' in `text` into an HTML
-    `<a href="...">` tag. Call this at render/publish time - e.g. right
-    before pushing a section's `content` (or the `conclusion`) into a CMS,
-    HTML template, or WordPress/Rank Math field - rather than anywhere
-    earlier in the pipeline, since every node up to this point deliberately
-    keeps writing plain Markdown links (exactly the way it already keeps
-    bullets/tables/quotes as Markdown).
-
-    Example:
-        >>> markdown_links_to_html("See [EOV's services](https://embarkingonvoyage.com/services/data-engineering/) for more.")
-        'See <a href="https://embarkingonvoyage.com/services/data-engineering/" target="_blank" rel="noopener noreferrer">EOV\\'s services</a> for more.'
-    """
     target_attr = ' target="_blank" rel="noopener noreferrer"' if new_tab else ""
 
     def _replace(match: "re.Match") -> str:
@@ -1232,16 +793,12 @@ def markdown_links_to_html(text: str, new_tab: bool = True) -> str:
 def build_graph():
     graph = StateGraph(BlogState)
     graph.add_node("plan", plan_node)
-    # graph.add_node("gather_links", gather_links_node)
     graph.add_node("draft", draft_node)
     graph.add_node("visual_prompts", generate_visual_prompts_node)
     graph.add_node("polish", polish_node)
     graph.add_node("seo_check", seo_check_node)
     graph.add_node("seo_fix", seo_fix_node)
-
     graph.set_entry_point("plan")
-    # graph.add_edge("plan", "gather_links")
-    # graph.add_edge("gather_links", "draft")
     graph.add_edge("plan", "draft")
     graph.add_edge("draft", "visual_prompts")
     graph.add_edge("visual_prompts", "polish")
@@ -1250,7 +807,6 @@ def build_graph():
         "seo_check", route_after_seo_check, {"end": END, "fix": "seo_fix"}
     )
     graph.add_edge("seo_fix", "seo_check")
-
     return graph.compile()
 
 
@@ -1263,43 +819,6 @@ def generate_blog(
     audience: str = "general readers",
     length: str = "medium",
 ) -> BlogState:
-    """Convenience wrapper: run the full graph for a keyword and return state.
-
-    state["final_blog"] is a JSON-serializable dict shaped like BlogPost:
-        {
-          "title": str,
-          "meta_description": str,
-          "slug": str,
-          "tags": [str, ...],
-          "sections": [
-              {
-                "heading": str,
-                "content": str,   # Markdown, incl. "[anchor](url)" links -
-                                   # run through markdown_links_to_html() at
-                                   # render time to get <a href="..."> tags
-                "needs_visual": bool,
-                "visual_type": str,
-                "visual_idea": str,
-              },
-              ...
-          ],
-          "conclusion": str,
-          "estimated_read_time_minutes": int
-        }
-
-    state["external_links"] / state["internal_links"] are the real,
-    search-grounded (title, url) pairs made available to the writer/editor
-    nodes:
-        [{"title": str, "url": str}, ...]
-
-    state["visual_prompts"] is a list of refined image-generation prompts,
-    one per section flagged needs_visual=True:
-        [{"heading": str, "visual_type": str, "image_prompt": str}, ...]
-
-    state["seo_report"] is the final Rank Math-style score breakdown:
-        {"score": int, "checks": {...}, "failed_checks": [...],
-         "internal_links_found": [...], "external_links_found": [...], ...}
-    """
     app = build_graph()
     initial_state: BlogState = {
         "keyword": keyword,

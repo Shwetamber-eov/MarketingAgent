@@ -1,12 +1,5 @@
 EOV_DOMAIN = "embarkingonvoyage.com"
 
-# Hand-verified, real EOV service pages (pulled from the live site nav,
-# Sept 2026) used as a fallback when a `site:embarkingonvoyage.com <keyword>`
-# grounded search comes back empty (e.g. a very niche keyword the EOV blog
-# hasn't covered yet). Keep this in sync if EOV's site structure changes -
-# gather_links_node will happily use a stale-but-still-live URL, but a
-# renamed/removed page will just silently fail the "must be real" bar less
-# gracefully than the search path does.
 EOV_SERVICE_CATALOG = [
   {
     "title": "AI-Native Digital Product Engineering",

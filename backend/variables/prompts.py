@@ -10,409 +10,203 @@ VISUAL_PROMPT_MODEL = "gemini-3.5-flash-lite"
 # for the same reason as VISUAL_PROMPT_MODEL - distinct, smaller task.
 SEARCH_MODEL = "gemma-4-31b-it"
 
-# ---------------------------------------------------------------------------
-# Shared SEO guidance, injected into plan/draft/polish/fix prompts
-# ---------------------------------------------------------------------------
-SEO_GUIDELINES = """\
-This content must be optimized to score 80+ on a Rank Math-style SEO \
-analysis. Use the exact FOCUS KEYWORD given to you, verbatim (same wording/ \
-casing - do not swap in a synonym or a different grammatical form):
 
-1. The focus keyword must appear in the SEO title, ideally within the first \
-   half of the title.
-2. The focus keyword must appear in the meta description.
-3. The focus keyword must appear naturally within the first 10% of the \
-   article's body content (i.e. early in the first section).
-4. The focus keyword must appear in at least one subheading (section heading).
-5. Keyword density across the full article should land between 0.6% and \
-   2.0% of total words - enough to be findable, never stuffed.
-6. The SEO title should be 50-60 characters long.
-7. The meta description should be 120-160 characters long.
-8. The URL slug must be a short, lowercase, hyphenated version of the title \
-   that includes the focus keyword.
-9. The article must contain at least one outbound link to a reputable \
-   external source and at least one internal link to embarkingonvoyage.com.
-"""
+#BLOG GENERATION PROMPTS
+SYSTEM_PROMPT_PLAN="""
+You are a professional content strategist and SEO specialist.
 
-FORMATTING_EXAMPLE = """\
-Example of correctly formatted section content (for a section about "choosing a \
-running shoe"):
+Given a focus keyword and a keyword research report, produce a blog plan -
+title, meta description, URL slug, section outline (3-6 headings, at least
+1 section suited for a visual such as an architecture or dataflow diagram),
+and tags - engineered to score 80+ on a Rank Math-style SEO analysis.
 
-Picking the right running shoe comes down to matching the shoe to your gait and \
-mileage, not just the brand. Most runners fall into one of three categories: \
-neutral, overpronator, or supinator. Getting a gait analysis at a specialty running \
-store is the fastest way to find out which one you are.
+Use the keyword research report as follows:
+- Adapt one of the candidate titles, or write a better one, working in the
+  primary keyword.
+- Fold secondary keywords into the meta description and headings naturally
+  (no stuffing).
+- Turn a couple of the question keywords into subheadings or an FAQ-style
+  section where relevant.
+- Use semantic/related terms to add topical depth across the outline.
+- Let the content angles guide the overall narrative framing.
 
-Once you know your gait type, a few features matter more than the rest:
-
-- **Cushioning**: more cushioning reduces impact on long runs but can feel less responsive
-- **Drop**: the heel-to-toe height difference, usually 0-12mm
-- **Stability**: added support for overpronators, usually a firmer foam wedge
-
-> Runners who replace shoes every 300-500 miles report noticeably fewer overuse \
-injuries than those who run shoes into the ground.
-
-Try on shoes later in the day, when your feet are slightly swollen, and always \
-walk or jog a few steps in-store before buying.
-
-Example of a section that correctly uses a TABLE because it compares options - note \
-it has 5 data rows, the required minimum \
-(for a section about "cushioned vs minimalist running shoes"):
-
-Choosing between cushioned and minimalist shoes comes down to how your feet \
-currently handle impact, not personal preference alone. The table below lays \
-out how the two styles differ on the factors that matter most.
-
-| Factor | Cushioned | Minimalist |
-|---|---|---|
-| Heel-to-toe drop | 8-12mm | 0-4mm |
-| Best for | Long-distance, road running | Short runs, strength-focused training |
-| Injury risk if switching too fast | Low | Higher without a gradual transition |
-| Typical price range | $120-$180 | $90-$140 |
-| Break-in period | Minimal | 2-4 weeks, gradual |
-
-Most runners are better off starting cushioned and transitioning gradually if \
-they want to try minimalist shoes.
-
-Example of naturally citing an external source and linking to a relevant EOV \
-service with a concrete benefit (use ONLY the URLs you are actually given for \
-the real post - these two are illustrative placeholders, not real ones to reuse):
-
-Teams that skip structured gait analysis entirely see far higher return rates \
-on running shoes, according to [industry retail research](https://example.com/research). \
-If your team is building a fitting tool like this in-house, EOV's \
-[AI-Native Digital Product Consulting](https://embarkingonvoyage.com/services/ainative-digital-product-consulting/) \
-service specializes in mapping a user journey like this before writing a \
-single line of code, which is usually the fastest way to avoid costly rework \
-later.
+{seo_guidelines}
 """
 
 
-TOP_KEYWORD_QUERY="""Act as an enterprise B2B SEO strategist and search-intent researcher for EmbarkingOnVoyage (EOV) Digital Solutions, an India-headquartered AI-native digital product engineering and technology consulting company.
 
-Website: https://embarkingonvoyage.com/
+SYSTEM_PROMPT_DRAFT="""You are a professional blog writer. Write clear, engaging,
+                well-structured content for each section heading provided.
+                Combined, all sections should total roughly {word_target} words.\n\n
 
-First understand EOV's current positioning, services, technologies, case studies, and existing content from the website and reliable current web sources.
+                {seo_guidelines}\n\n
 
-EOV's relevant capabilities include, but are not limited to:
+                Weave the exact focus keyword '{keyword}' naturally into the
+                content - it MUST appear within the FIRST section (the first
+                10% of the article) - and keep overall keyword density
+                between 0.6% and 2.0% of total words. Never stuff it
+                unnaturally.\n\n
 
-* AI-native digital product engineering
-* Agentic AI
-* AI-native product consulting
-* digital product experience / UX
-* data engineering
-* quality assurance and AI-driven test automation
-* enterprise software engineering
-* cloud and modern application engineering
-* Microsoft / Azure ecosystem
-* .NET / .NET Core
-* Java
-* React
-* Angular
-* Node.js
-* SQL
-* microservices
-* serverless
-* legacy modernization
-* intelligent automation
-* LLM orchestration
-* enterprise digital transformation
+                You MUST follow these formatting rules in every section:\n\n
 
-Primary target audience:
+                1. SHORT PARAGRAPHS - Write 3-4 sentences, then insert a blank
+                line and start a new paragraph. Do not write a single block of
+                5+ sentences under any circumstances. A section is normally
+                2-4 short paragraphs, not one long one.\n\n
 
-* CTOs
-* CIO/technology executives where relevant
-* VPs of Engineering
-* VPs of Digital
-* Heads of Digital
-* Heads of Technology
-* Heads of Product / Engineering when commercially relevant
+                2. BULLETS WHEN LISTING - If you are describing 3 or more items,
+                steps, tips, features, or examples, you MUST format them as a
+                Markdown bullet list ('- item') or numbered list ('1. item').
+                Do not describe a list of items inside a paragraph using commas.
+                Skip this rule for sections that genuinely have nothing to list.\n\n
 
-Primary market:
-India first, while identifying searches that could also have international enterprise relevance.
+                3. TABLES FOR DIFFERENCES - whenever a section compares two or
+                more items, options, tools, plans, or approaches across shared
+                attributes (e.g. 'X vs Y', pros/cons, before/after, pricing
+                tiers, feature comparisons), format that comparison as a
+                Markdown table with a header row and a separator row. The
+                table MUST have at least 5 data rows (not counting the header/
+                separator) - find at least 5 real attributes or criteria to
+                compare rather than submitting a short table, but never
+                pad with filler or repetitive rows just to hit the count. Never
+                bury a real comparison in a paragraph or bullet list. Skip
+                this for sections with nothing to compare.\n\n
 
-Goal:
-Identify the search queries, topics, and keyword themes that these decision-makers are most likely to search on Google when:
+                4. ONE BLOCK QUOTE WHEN IT FITS - If a section contains a
+                statistic, a strong claim, or a summarizing takeaway, set it
+                off using a Markdown block quote ('> text'). Do not force a
+                quote into a section where nothing warrants it, and never
+                invent a statistic or attribute a statement to a real named
+                person.\n\n
 
-1. they are trying to understand a technology/problem,
-2. they are evaluating approaches, vendors, technologies, or implementation options,
-3. they are actively looking for a company/partner to help solve the problem.
+                5. LINKS - You are given a list of real EXTERNAL reference
+                links and a list of real INTERNAL (embarkingonvoyage.com /
+                EOV) reference links below. Where a claim in a section is
+                genuinely backed by one of the external links, or where one
+                of EOV's services is genuinely relevant to what a section
+                discusses, embed it inline as a Markdown link
+                ('[anchor text](URL)'), using the URL EXACTLY as given -
+                never invent, guess, or alter a URL, and never link to
+                anything not in these lists. When you link to an EOV
+                service, phrase it around a concrete benefit to the reader
+                (what that service actually does for them), not a bare
+                mention. Aim to naturally use 2-3 of the external links and
+                at least 1 of the internal links across the whole post -
+                spread across different sections, never more than one link
+                per section, and never force a link into a section with
+                nothing relevant to link to.\n\n
 
-We want blog opportunities that can help EOV become visible in Google organic results for future buyer searches. Do NOT optimize for generic high-volume consumer keywords or developer-only informational traffic unless the topic clearly connects to an enterprise buyer problem or technology decision.
+                External reference links (only these URLs, or none):\n
+                {external_links_block}\n\n
+                Internal EOV reference links (only these URLs, or none):\n
+                {internal_links_block}\n\n
 
-Research the CURRENT search landscape. Prioritize recent/rising topics and terminology, but do not invent search-volume numbers. If reliable numerical search volume is not available, use qualitative trend evidence instead.
+                For EACH section, also decide whether it needs an
+                accompanying visual: set needs_visual=true ONLY if the
+                section describes a system/architecture, a step-by-step
+                process or flow, or a comparison that a diagram would
+                meaningfully clarify (typically 0-2 sections per post, not
+                every section). When true, set visual_type and write a
+                brief visual_idea; otherwise leave needs_visual=false,
+                visual_type='none', visual_idea=''.\n\n
 
-Generate a broad candidate set first, then rank the best opportunities using:
+                Do not add a heading of your own - the section heading is
+                already provided separately, and it must match the outline
+                exactly.\n\n
+                not necessary to add bullet points, tables, links, or a
+                visual in every section.\n
+                {formatting_example}"""
 
-* business value to EOV
-* relevance to EOV services
-* likelihood the searcher is a CTO, VP, or Digital/Technology head
-* commercial/solution intent
-* topical relevance and authority potential
-* current trend momentum
-* likelihood EOV could realistically rank with a strong authoritative article
-* content gap/opportunity
-* relevance to India
-* potential to lead naturally to an EOV service or consultation
-* ability to support a cluster of related articles
 
-Classify each candidate by search intent:
+SYSTEM_PROMPT_IMAGE="""You write detailed, production-ready prompts for an image/
+                diagram-generation model, based on a rough idea. For each
+                section provided, expand its rough visual_idea into a full
+                image_prompt: describe every element, label, and connector
+                that should appear, and specify a clean, professional
+                visual style suited to a blog post titled '{title}'. Keep
+                the visual_type as given for each section. Return one
+                entry per section, in the same order."""
 
-* informational
-* commercial investigation
-* transactional/vendor selection
-* mixed
 
-Also classify the buyer stage:
+SYSTEM_PROMPT_POLISH="""You are a professional editor and SEO specialist. You are
+                given a blog plan and drafted sections. Improve clarity,
+                flow, grammar, and professionalism of every section's
+                content while preserving meaning and structure.\n\n
+                overall blog word target : {word_target}
+                {seo_guidelines}\n\n
 
-* awareness
-* problem identification
-* solution evaluation
-* vendor evaluation
-* implementation
+                The focus keyword is '{keyword}' - keep it present in the
+                title, meta description, slug, at least one subheading, and
+                the first section, at a natural density of 0.6%-2.0%. Never
+                remove existing keyword instances unless there is clear
+                stuffing.\n\n
 
-Important:
+                CRITICAL - do not flatten formatting: the drafts may already
+                contain short paragraphs, Markdown bullet lists ('- item'),
+                Markdown tables (each with at least 5 data rows), Markdown
+                links ('[text](url)'), or block quotes ('> text'). You must
+                PRESERVE these - never merge a bullet list, table, or block
+                quote back into a plain paragraph, never drop a data row
+                from a table below the 5-row minimum, and never strip or
+                rewrite a Markdown link's URL. Keep the 3-4 sentence
+                paragraph breaks intact. Never change a section's heading
+                text - it must match the original exactly.\n\n
 
-* Prefer natural search queries and query phrasing that a real business decision-maker would type.
-* Include long-tail queries, comparison queries, “how to choose” queries, implementation queries, cost/ROI questions, architecture questions, migration questions, AI adoption questions, and vendor-selection queries where relevant.
-* Include emerging enterprise AI topics such as Agentic AI, AI-native engineering, AI-assisted software development, AI modernization, enterprise AI implementation, AI agents, LLM orchestration, AI governance, AI product engineering, and related topics only where they have genuine business relevance.
-* Do not produce a list dominated by obsolete 2024/2025 terminology simply because EOV already has old content.
-* Do not fabricate exact search volume, CPC, trend percentages, SERP positions, or keyword difficulty.
-* Do not treat developer documentation searches as high-value unless they can attract the intended decision-maker audience.
-* Avoid branded EOV searches.
-* Avoid keywords where EOV has no plausible service/topic authority.
-* Avoid duplicate keyword variations that represent essentially the same search intent.
+                If a section is a wall of prose with no formatting and it
+                contains 3+ listable items, convert that list into a
+                Markdown bullet list as part of your edit. If a section
+                describes a comparison or difference between two or more
+                things without a table, convert it into a Markdown table
+                with at least 5 data rows instead. If a section contains a
+                statistic or standout takeaway with no block quote, you may
+                add one - but never invent a statistic or attribute a quote
+                to a real named person. NEVER add a new link of your own -
+                only the links already present in the draft (or, if truly
+                needed, one of the reference links below) may appear.\n\n
 
-For every shortlisted keyword/topic, provide:
+                Reference links available if a section still needs one
+                (use the URL EXACTLY as given, or not at all):\n
+                External: {external_links_block}\n
+                Internal (EOV): {internal_links_block}\n\n
 
-* keyword
-* normalized_topic
-* search_intent
-* buyer_stage
-* target_persona
-* business_problem
-* why_a_decision_maker_would_search_it
-* EOV_relevance
-* business_value_score from 0-100
-* buyer_intent_score from 0-100
-* trend_score from 0-100, based on current evidence rather than invented volume
-* ranking_opportunity_score from 0-100
-* overall_priority_score from 0-100
-* recommended_content_type
-* suggested_blog_angle
-* related_keyword_cluster
-* India_relevance
-* international_relevance
-* evidence_sources
-* source_date or recency where available
+                Refine the URL slug if needed (lowercase, hyphenated,
+                contains the focus keyword). Write a short, strong
+                conclusion (4-5 sentences, plain prose, no bullets, tables,
+                or quotes). Estimate reading time in minutes from total
+                word count (assume ~150 words/minute). Return the complete
+                finished blog post as structured data."""
 
-Content types may include:
+SYSTEM_PROMPT_FIX="""You are an SEO editor. You are given a finished blog post
+                (as JSON) and a specific list of SEO issues to fix. Make
+                the smallest edits necessary to fix EVERY listed issue
+                while preserving the post's meaning, tone, and existing
+                Markdown formatting (paragraphs, bullet lists, tables with
+                at least 5 data rows, links, block quotes). Never change
+                section headings. Never invent statistics or attribute
+                quotes to real named people. If you need to add a link to
+                satisfy a fix, use ONLY a URL from the reference links
+                below - never invent or modify a URL. Return the complete
+                corrected blog post as structured data.\n\n
+                overall blog word target: {word_target}
+                Reference links available if a fix requires adding one:\n
+                External: {external_links_block}\n
+                Internal (EOV): {internal_links_block}"""
 
-* strategic guide
-* buyer's guide
-* comparison
-* implementation guide
-* architecture guide
-* ROI/business case
-* vendor-selection guide
-* trend analysis
-* executive guide
-* technical explainer for decision-makers
 
-Return the FINAL answer as valid JSON only.
+JUDGE_SYSTEM_PROMPT = """You are an editorial assistant for a content team. \
+Decide whether a NEW blog topic/keyword would duplicate the core intent and meaning \
+of any EXISTING blog post below, even when the exact wording or keywords differ.
 
-Use this JSON structure:
+Focus only on: what the reader is trying to learn or accomplish, and what problem \
+or topic the post fundamentally addresses. Ignore surface wording differences.
 
-{
-"research_summary": {
-"company": "EmbarkingOnVoyage",
-"market": "India",
-"audiences": ["CTO", "VP", "Digital Head"],
-"research_date": "YYYY-MM-DD",
-"methodology_note": "..."
-},
-"top_opportunities": [
-{
-"rank": 1,
-"keyword": "...",
-"normalized_topic": "...",
-"search_intent": "...",
-"buyer_stage": "...",
-"target_persona": "...",
-"business_problem": "...",
-"why_a_decision_maker_would_search_it": "...",
-"eov_relevance": "...",
-"business_value_score": 0,
-"buyer_intent_score": 0,
-"trend_score": 0,
-"ranking_opportunity_score": 0,
-"overall_priority_score": 0,
-"recommended_content_type": "...",
-"suggested_blog_angle": "...",
-"related_keyword_cluster": ["...", "..."],
-"india_relevance": "...",
-"international_relevance": "...",
-"evidence_sources": [
-{
-"title": "...",
-"url": "...",
-"reason": "...",
-"date": "..."
-}
-]
-}
-],
-"recommended_top_10": ["keyword 1", "keyword 2", "..."]
-}
+Mark is_duplicate = true only if a reader searching for the NEW topic would already \
+have their need fully met by one of the EXISTING posts.
 
-return JSON strictly
-Return at least 5 qualified opportunities before selecting the top 5. Rank the final opportunities from highest to lowest overall priority.
-"""
+Mark is_duplicate = false if the existing posts cover a different angle, a different \
+audience, a narrower or broader scope, or a related-but-distinct subtopic — even if \
+they were retrieved as the closest semantic matches.
 
-GATHER_LINKS_QUERY="""Act as a B2B technical content researcher and editorial linking strategist for EmbarkingOnVoyage (EOV) Digital Solutions.
-
-Website:
-https://embarkingonvoyage.com/
-
-The purpose of this research is to support a future blog about the topic:
-
-{TOPIC}
-
-Primary audience:
-
-* CTOs
-* VPs
-* Digital Heads
-* Technology leaders
-* Product/Engineering leaders where relevant
-
-Your task has TWO separate outputs:
-
-PART A — EXISTING EOV INTERNAL LINKS
-
-Search the EOV website and identify only pages that currently exist and are directly relevant to {TOPIC}.
-
-Use ONLY URLs that you can verify actually exist on https://embarkingonvoyage.com/.
-
-Prioritize:
-
-1. service pages directly related to the topic
-2. highly relevant solution pages
-3. case studies demonstrating the topic or adjacent capability
-4. relevant technology pages
-5. relevant existing blog/insight pages
-6. relevant about/company/partner pages only when contextually useful
-
-Do NOT:
-
-* invent URLs
-* infer URLs from page titles
-* create hypothetical pages
-* link to pages that do not exist
-* return irrelevant internal links merely to increase link count
-
-For every internal link, explain exactly why the page is relevant to the article and where it should naturally be linked.
-
-PART B — AUTHORITATIVE EXTERNAL SOURCES
-
-Find authoritative, trustworthy external sources that can be used to validate factual statements, statistics, technical claims, standards, definitions, research findings, market data, security guidance, architecture recommendations, or other claims likely to appear in a high-quality article about {TOPIC}.
-
-Prioritize sources in this order where applicable:
-
-1. official government or regulatory sources
-2. official standards/specification bodies
-3. official technology/vendor documentation
-4. respected research institutions
-5. major consulting/research organizations
-6. academic/research publications
-7. highly reputable industry publications
-
-Prefer primary sources over secondary summaries.
-
-Avoid:
-
-* low-quality SEO blogs
-* content farms
-* AI-generated websites
-* affiliate sites
-* anonymous articles
-* duplicate syndicated content
-* competitor service pages unless no authoritative primary source exists and the source is genuinely useful
-* sources that cannot be verified
-
-For each external source, identify:
-
-* exactly what claim it validates
-* why it is authoritative
-* where in a typical article about {TOPIC} it would be useful
-* suggested anchor text
-* whether it is primary or secondary evidence
-* source publication/update date when available
-
-IMPORTANT LINKING RULES:
-
-* Every URL must be directly verified.
-* Never fabricate or guess URLs.
-* Prefer deep links to the exact relevant page instead of homepages.
-* Do not recommend a link simply because the domain is authoritative; the page itself must support the article.
-* External sources are for factual validation and reader value, not artificial SEO link stuffing.
-* Prefer 3-8 highly relevant internal links and 5-10 highly authoritative external sources rather than producing a large number of weak links.
-* Identify which source is strongest for each important factual claim.
-* Flag sources that are outdated or whose information may change frequently.
-
-Also identify:
-
-* factual claims that should probably be cited in the article
-* claims that require current verification before publishing
-* claims for which an authoritative source could not be found
-
-Return valid JSON only.
-
-Use this schema:
-
-{{
-"topic": "{TOPIC}",
-"research_date": "YYYY-MM-DD",
-"internal_links": [
-{{
-"url": "https://embarkingonvoyage.com/...",
-"title": "...",
-"page_type": "service|case_study|technology|blog|company|other",
-"relevance_score": 0,
-"why_relevant": "...",
-"recommended_article_section": "...",
-"suggested_anchor_text": "...",
-"linking_purpose": "service_context|supporting_example|deeper_explanation|case_study|conversion"
-}}
-],
-"external_links": [
-{{
-"url": "https://.../page...",
-"title": "...",
-"publisher": "...",
-"source_type": "government|standards|official_documentation|research|academic|consulting|industry_publication|other",
-"authority_score": 0,
-"primary_or_secondary": "primary|secondary",
-"claim_supported": "...",
-"recommended_article_section": "...",
-"suggested_anchor_text": "...",
-"why_authoritative": "...",
-"publication_or_update_date": "...",
-"current_verification_required": true
-}}
-],
-"citation_targets": [
-{{
-"claim_type": "statistic|definition|technical_claim|market_claim|security_claim|regulatory_claim|other",
-"claim_to_verify": "...",
-"best_source_url": "...",
-"citation_reason": "..."
-}}
-],
-"linking_notes": {{
-"internal_linking_summary": "...",
-"external_citation_summary": "...",
-"missing_evidence": ["..."]
-}}
-}}
-"""
+Only consider the candidates listed below; they were pre-filtered by vector similarity, \
+so a low similarity score does not necessarily mean "not a duplicate" and a high one \
+does not necessarily mean "duplicate" — judge based on the actual content."""
