@@ -1,15 +1,14 @@
-_VALID_MODELS = {"gemini-3.5-flash-lite", "gemma-4-31b-it", "gemma-3-12b-it"}
+_VALID_MODELS = {"gemini-3.5-flash-lite", "gemini-3.5-flash-lite", "gemma-3-12b-it"}
 
 # Fixed model used specifically for expanding rough visual ideas into full
 # image-generation prompts - kept separate from GOOGLE_MODEL since this is a
 # smaller, distinct task from the main writing pipeline.
-VISUAL_PROMPT_MODEL = "gemma-4-31b-it"
+VISUAL_PROMPT_MODEL = "gemini-3.5-flash-lite"
 
 # Fixed model used for Google Search-grounded link discovery. Confirmed to
 # support the built-in `google_search` tool. Kept separate from GOOGLE_MODEL
 # for the same reason as VISUAL_PROMPT_MODEL - distinct, smaller task.
 SEARCH_MODEL = "gemma-4-31b-it"
-
 
 # ---------------------------------------------------------------------------
 # Shared SEO guidance, injected into plan/draft/polish/fix prompts
@@ -266,7 +265,8 @@ Use this JSON structure:
 "recommended_top_10": ["keyword 1", "keyword 2", "..."]
 }
 
-Return at least 25 qualified opportunities before selecting the top 10. Rank the final opportunities from highest to lowest overall priority.
+return JSON strictly
+Return at least 5 qualified opportunities before selecting the top 5. Rank the final opportunities from highest to lowest overall priority.
 """
 
 GATHER_LINKS_QUERY="""Act as a B2B technical content researcher and editorial linking strategist for EmbarkingOnVoyage (EOV) Digital Solutions.
@@ -370,11 +370,11 @@ Return valid JSON only.
 
 Use this schema:
 
-{
+{{
 "topic": "{TOPIC}",
 "research_date": "YYYY-MM-DD",
 "internal_links": [
-{
+{{
 "url": "https://embarkingonvoyage.com/...",
 "title": "...",
 "page_type": "service|case_study|technology|blog|company|other",
@@ -383,11 +383,11 @@ Use this schema:
 "recommended_article_section": "...",
 "suggested_anchor_text": "...",
 "linking_purpose": "service_context|supporting_example|deeper_explanation|case_study|conversion"
-}
+}}
 ],
 "external_links": [
-{
-"url": "https://...",
+{{
+"url": "https://.../page...",
 "title": "...",
 "publisher": "...",
 "source_type": "government|standards|official_documentation|research|academic|consulting|industry_publication|other",
@@ -399,20 +399,20 @@ Use this schema:
 "why_authoritative": "...",
 "publication_or_update_date": "...",
 "current_verification_required": true
-}
+}}
 ],
 "citation_targets": [
-{
+{{
 "claim_type": "statistic|definition|technical_claim|market_claim|security_claim|regulatory_claim|other",
 "claim_to_verify": "...",
 "best_source_url": "...",
 "citation_reason": "..."
-}
+}}
 ],
-"linking_notes": {
+"linking_notes": {{
 "internal_linking_summary": "...",
 "external_citation_summary": "...",
 "missing_evidence": ["..."]
-}
-}
+}}
+}}
 """
