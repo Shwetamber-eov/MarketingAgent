@@ -604,8 +604,8 @@ def plan_node(state: BlogState) -> BlogState:
             "keyword_context": keyword_context,
         }
     )
-    # with PLAN_PATH.open("w") as json_file:
-    #     json.dump({"plan": plan.model_dump()}, json_file, indent=4)
+    with PLAN_PATH.open("w") as json_file:
+        json.dump({"plan": plan.model_dump()}, json_file, indent=4)
     # print(time.perf_counter() - start_time)
     return {"plan": plan.model_dump()}
 
