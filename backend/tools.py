@@ -129,8 +129,8 @@ def isblogexist(new_keyword: str, top_k: int = TOP_K_DEFAULT) -> tuple[bool, str
 def send_blog_email(
     blog_markdown: str,
     sender_app_password: str = os.getenv("GOOGLE_APP_PASSWORD"),
-    sender_email: str = "ronittayade1@gmail.com",
-    recipient_email: str = "ronittayade1@gmail.com",
+    sender_email: str = os.getenv("RECIPIENT_MAIL_ID"),
+    recipient_email: str = os.getenv("RECIPIENT_MAIL_ID"),
     title: str = "",
     subject: str = "Your AI Generated Blog "
 ):
