@@ -303,9 +303,6 @@ def run_generation_pipeline(topic: dict):
                 audience=audience,
                 length=length,
             )
-            st.write("✍️ Drafting sections — JSON...")
-            st.write("🖼️ Writing image/diagram prompts for flagged sections...")
-            st.write("🪄 Polishing final structured blog — JSON...")
 
             final_blog = result.get("final_blog")
             if not final_blog:
