@@ -5,14 +5,18 @@ Blog scraper for embarkingonvoyage.com/blog
 Crawls every paginated listing page (page/2/, page/3/, ... following the
 "next" link automatically, so it keeps working even if the total page
 count changes) and extracts each post card's title, excerpt, URL, author,
-date, and read time. Optionally visits each individual post page to also
-grab the full article body.
+date, and read time.
+
+Compares discovered posts against an existing archive CSV (--input,
+typically old_blog_posts.csv) and writes ONLY the newly-found posts to
+the output CSV (--output, typically blog_posts.csv). This output file is
+meant to be a hand-off buffer for a downstream ingestion step, which is
+responsible for merging it into the archive and clearing it afterward.
 
 Usage:
-    python blog_scraper.py                       # scrape all pages, listing data only
-    python blog_scraper.py --pages 5              # only crawl the first 5 listing pages
-    python blog_scraper.py --full-content          # also fetch full article text (slower)
-    python blog_scraper.py --output posts.json      # write JSON instead of CSV
+    python blog_scraper.py                  # scrape all pages, listing data only
+    python blog_scraper.py --pages 5        # only crawl the first 5 listing pages
+    python blog_scraper.py --output posts.csv --input old_posts.csv
 
 Requirements:
     pip install requests beautifulsoup4
@@ -36,8 +40,8 @@ BASE_LISTING_URL = "https://embarkingonvoyage.com/blog/"
 USER_AGENT = "Mozilla/5.0 (compatible; BlogScraperBot/1.0)"
 REQUEST_DELAY = 1.0
 
-# Only check the latest 10 listing pages
-MAX_PAGES = 10
+# Default cap on how many listing pages to crawl in one run.
+MAX_PAGES = 150
 
 # ---- Selectors matching embarkingonvoyage.com's WordPress theme ----
 CARD_SELECTOR = "li.wp-block-post"
@@ -60,33 +64,37 @@ CSV_COLUMNS = [
 ]
 
 # Cache robots.txt parsers per domain so we don't re-fetch it on every page.
+# Use a sentinel to distinguish "not yet cached" from "cached as failed",
+# since a plain None can't tell those apart on a dict.get().
 _ROBOTS_CACHE = {}
+_ROBOTS_FETCH_FAILED = object()
 
 
 def can_fetch(url, user_agent=USER_AGENT):
     """Check robots.txt before fetching a URL (cached per domain)."""
     parsed = urlparse(url)
     domain_key = f"{parsed.scheme}://{parsed.netloc}"
-    print("domain key is::::::::::::::::", domain_key)
-    rp = _ROBOTS_CACHE.get(domain_key)
+    cached = _ROBOTS_CACHE.get(domain_key)
 
-    if rp is None:
+    if cached is None:
         robots_url = f"{domain_key}/robots.txt"
         rp = RobotFileParser()
 
         try:
             rp.set_url(robots_url)
             rp.read()
+            _ROBOTS_CACHE[domain_key] = rp
+            cached = rp
         except Exception:
-            # If robots.txt cannot be read, allow the request.
-            rp = None
+            # If robots.txt cannot be read, cache the failure (don't retry
+            # on every page) and allow the request.
+            _ROBOTS_CACHE[domain_key] = _ROBOTS_FETCH_FAILED
+            return True
 
-        _ROBOTS_CACHE[domain_key] = rp
-
-    if rp is None:
+    if cached is _ROBOTS_FETCH_FAILED:
         return True
 
-    return rp.can_fetch(user_agent, url)
+    return cached.can_fetch(user_agent, url)
 
 
 def get_soup(url, session):
@@ -181,19 +189,18 @@ def find_next_page(soup, current_url):
 
 def load_existing_csv(path):
     """
-    Load existing CSV.
+    Load existing archive CSV (used only to know which URLs are already
+    known, so we don't re-report them as "new").
 
     Returns:
-        existing_posts: list of existing rows
-        existing_urls: set of normalized URLs
+        existing_urls: set of normalized URLs already present
     """
 
-    existing_posts = []
     existing_urls = set()
 
     if not path.exists():
-        print(f"CSV does not exist yet: {path}")
-        return existing_posts, existing_urls
+        print(f"Archive CSV does not exist yet: {path}")
+        return existing_urls
 
     with open(path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -204,23 +211,16 @@ def load_existing_csv(path):
             if not url:
                 continue
 
-            row["url"] = normalize_url(url)
+            existing_urls.add(normalize_url(url))
 
-            existing_posts.append({
-                column: row.get(column, "")
-                for column in CSV_COLUMNS
-            })
+    print(f"Existing archive records: {len(existing_urls)}")
 
-            existing_urls.add(row["url"])
-
-    print(f"Existing CSV records: {len(existing_posts)}")
-
-    return existing_posts, existing_urls
+    return existing_urls
 
 
 def scrape_latest_pages(start_url, session, max_pages=10):
     """
-    Scrape only the latest N listing pages.
+    Scrape listing pages, following "next" links, up to max_pages.
     """
 
     all_posts = []
@@ -275,23 +275,22 @@ def scrape_latest_pages(start_url, session, max_pages=10):
     return all_posts
 
 
-def append_new_posts(path, existing_posts, new_posts):
+def write_new_posts(path, new_posts):
     """
-    Append new posts to the CSV while preserving existing records.
+    Write ONLY the newly discovered posts to the output CSV.
+
+    This file is a hand-off buffer for a downstream ingestion step: it is
+    always (re)written from scratch with just this run's new posts (never
+    merged with the archive), so the downstream step can safely append it
+    to the archive and clear it without re-processing old rows.
+
+    A header-only file is written even when there are zero new posts, so
+    downstream tooling can rely on the file always existing and being
+    valid CSV.
     """
 
-    if not new_posts:
-        print("\nNo new blogs found.")
-        return
-
-    # Make sure the output directory exists (important when running in Docker
-    # with a mounted volume that might not have the folder pre-created).
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Combine existing + new
-    all_posts = existing_posts + new_posts
-
-    # Write complete CSV using the same column structure
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
@@ -300,18 +299,22 @@ def append_new_posts(path, existing_posts, new_posts):
         )
 
         writer.writeheader()
-        writer.writerows(all_posts)
+        writer.writerows(new_posts)
 
-    print(f"\nAdded {len(new_posts)} new blog(s).")
-    print(f"Total blogs in CSV: {len(all_posts)}")
-    print(f"Saved to: {path}") 
+    if new_posts:
+        print(f"\nWrote {len(new_posts)} new blog(s) to: {path}")
+        for post in new_posts:
+            print("Title: ", post.get("title"))
+    else:
+        print(f"\nNo new blogs found. Wrote header-only file to: {path}")
+
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Check the latest 10 blog pages on "
-            "embarkingonvoyage.com and append new posts "
-            "to an existing CSV."
+            "Check embarkingonvoyage.com's blog listing pages and write "
+            "any posts not already present in the archive CSV to the "
+            "output CSV."
         )
     )
     parser.add_argument(
@@ -324,24 +327,33 @@ def main():
         "--pages",
         type=int,
         default=MAX_PAGES,
-        help="Number of latest listing pages to check (default: 10)"
+        help=f"Number of latest listing pages to check (default: {MAX_PAGES})"
     )
 
     parser.add_argument(
         "--output",
         default="data/blog_posts.csv",
-        help="Existing CSV file"
+        help="Output CSV to write newly discovered posts to (overwritten each run)"
+    )
+
+    parser.add_argument(
+        "--input",
+        default="data/old_blog_posts.csv",
+        help="Existing archive CSV used to detect which posts are already known"
     )
 
     args = parser.parse_args()
 
-    output_path = Path(args.output)
+    output_path = ROOT / Path(args.output)
+    input_path = ROOT / Path(args.input)
+    print("output path:", output_path)
+    print("input path:", input_path)
 
     # ---------------------------------------------------------
-    # 1. Load existing CSV
+    # 1. Load existing archive URLs
     # ---------------------------------------------------------
 
-    existing_posts, existing_urls = load_existing_csv(output_path)
+    existing_urls = load_existing_csv(input_path)
 
     # ---------------------------------------------------------
     # 2. Create HTTP session
@@ -354,7 +366,7 @@ def main():
     })
 
     # ---------------------------------------------------------
-    # 3. Check latest pages
+    # 3. Scrape listing pages
     # ---------------------------------------------------------
 
     discovered_posts = scrape_latest_pages(
@@ -397,14 +409,10 @@ def main():
             print(f"   Date: {post['date_display']}")
 
     # ---------------------------------------------------------
-    # 6. Append new posts
+    # 6. Write new posts to the output buffer file
     # ---------------------------------------------------------
 
-    append_new_posts(
-        output_path,
-        existing_posts,
-        new_posts
-    )
+    write_new_posts(output_path, new_posts)
 
 
 if __name__ == "__main__":

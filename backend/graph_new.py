@@ -6,7 +6,7 @@ from typing import Dict, Any
 from typing import TypedDict, List, Optional
 from dotenv import load_dotenv
 import time
-
+import streamlit as st
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -22,7 +22,6 @@ from backend.variables.prompts import (
     SYSTEM_PROMPT_IMAGE, 
     SYSTEM_PROMPT_POLISH, 
     SYSTEM_PROMPT_FIX,
-    SEO_GUIDELINES,
     VISUAL_PROMPT_MODEL,
     _VALID_MODELS,
     )
@@ -364,7 +363,7 @@ def plan_node(state: BlogState) -> BlogState:
 def draft_node(state: BlogState) -> BlogState:
     print("==============================\n\n in draft node \n\n=====================================")
     now = datetime.now()
-
+    st.write("✍️ Drafting sections — JSON...")
 # Format as Hour:Minute:Second
     current_time = now.strftime("%H:%M:%S")
     print("Current Time:", current_time)
@@ -414,7 +413,7 @@ def draft_node(state: BlogState) -> BlogState:
 def generate_visual_prompts_node(state: BlogState) -> BlogState:
     print("==============================\n\n in generate prompt node \n\n=====================================")
     now = datetime.now()
-
+    st.write("🖼️ Writing image/diagram prompts for flagged sections...")
 # Format as Hour:Minute:Second
     current_time = now.strftime("%H:%M:%S")
     print("Current Time:", current_time)
@@ -458,7 +457,7 @@ def generate_visual_prompts_node(state: BlogState) -> BlogState:
 def polish_node(state: BlogState) -> BlogState:
     print("==============================\n\n in polish node \n\n=====================================")
     now = datetime.now()
-
+    st.write("🪄 Polishing final structured blog — JSON...")
 # Format as Hour:Minute:Second
     current_time = now.strftime("%H:%M:%S")
     print("Current Time:", current_time)
